@@ -4,6 +4,7 @@ import { useRouter, useRoute } from 'vue-router'
 
 const router = useRouter()
 const route = useRoute()
+const api = window.electronAPI
 
 const waStatus = ref('disconnected')
 const igStatus = ref('disconnected')
@@ -55,10 +56,10 @@ onUnmounted(() => {
       </button>
     </nav>
     <div class="bottom">
-      <button class="clear-btn" @click="window.electronAPI.app.clearTokens()">
+      <button class="clear-btn" @click="api.app.clearTokens()">
         Limpar tokens
       </button>
-      <button class="refresh-btn" @click="window.electronAPI.app.reload()">
+      <button class="refresh-btn" @click="api.app.reload()">
         Recarregar
       </button>
     </div>

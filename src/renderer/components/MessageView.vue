@@ -5,7 +5,9 @@ import { formatTime, getText, isMine } from '@shared/utils'
 const props = defineProps<{
   messages: any[]
   chatName: string
+  loading?: boolean
   sending?: boolean
+  error?: string
 }>()
 
 const emit = defineEmits<{ send: [text: string] }>()
@@ -26,7 +28,11 @@ function handleSend() {
     </div>
 
     <div class="messages">
+      <div v-if="loading" class="conversation-loading">
+        <span class="conversation-spinner"></span>
+      </div>
       <div
+        v-else
         v-for="msg in messages"
         :key="msg.id || msg.key?.id"
         :class="['message', { mine: isMine(msg) }]"
@@ -45,17 +51,20 @@ function handleSend() {
         placeholder="Digite uma mensagem..."
         @keydown.enter="handleSend"
       />
-      <button @click="handleSend" :disabled="!inputText.trim() || sending">
+      <button @click="handleSend" :disabled="!inputText.trim() || sending || loading">
         <span v-if="sending" class="spinner"></span>
         <span v-else>Enviar</span>
       </button>
     </div>
+    <p v-if="error" class="send-error">{{ error }}</p>
   </div>
 </template>
 
 <style scoped lang="scss">
 .message-view {
   flex: 1;
+  min-height: 0;
+  min-width: 0;
   @include flex-column;
 }
 
@@ -72,6 +81,15 @@ function handleSend() {
   padding: 16px;
   @include flex-column;
   gap: 6px;
+}
+
+.conversation-loading {
+  flex: 1;
+  @include flex-center;
+}
+
+.conversation-spinner {
+  @include spinner;
 }
 
 .message { display: flex; }
@@ -132,5 +150,11 @@ function handleSend() {
 .spinner {
   display: inline-block;
   @include spinner(14px, 2px, #111, transparent);
+}
+
+.send-error {
+  margin: 0 16px 10px;
+  color: $text-error;
+  font-size: 12px;
 }
 </style>

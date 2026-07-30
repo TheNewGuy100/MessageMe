@@ -14,6 +14,7 @@ interface IgCookies {
   sessionid: string
   csrftoken: string
   ds_user_id: string
+  extra?: Record<string, string>
 }
 
 class InstagramService extends EventEmitter {
@@ -21,13 +22,33 @@ class InstagramService extends EventEmitter {
   private status: 'disconnected' | 'connected' = 'disconnected'
   private threads: any[] = []
   private pollTimer: any = null
+  private webWindow: BrowserWindow | null = null
 
   getStatus() { return this.status }
   getThreads() { return this.threads }
 
   private cookieString() {
     if (!this.cookies) return ''
-    return `sessionid=${this.cookies.sessionid}; csrftoken=${this.cookies.csrftoken}; ds_user_id=${this.cookies.ds_user_id}`
+    const cookies = {
+      ...this.cookies.extra,
+      sessionid: this.cookies.sessionid,
+      csrftoken: this.cookies.csrftoken,
+      ds_user_id: this.cookies.ds_user_id
+    }
+    return Object.entries(cookies).map(([name, value]) => `${name}=${value}`).join('; ')
+  }
+
+  private async getWebWindow() {
+    if (this.webWindow && !this.webWindow.isDestroyed()) return this.webWindow
+    this.webWindow = new BrowserWindow({
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true
+      }
+    })
+    await this.webWindow.loadURL(`${BASE}/direct/inbox/`)
+    return this.webWindow
   }
 
   private async igFetch(path: string, options: RequestInit = {}) {
@@ -86,7 +107,17 @@ class InstagramService extends EventEmitter {
           const uid = allCookies.find(c => c.name === 'ds_user_id')
 
           if (sid?.value && csrf?.value && uid?.value) {
-            this.cookies = { sessionid: sid.value, csrftoken: csrf.value, ds_user_id: uid.value }
+            const coreCookies = new Set(['sessionid', 'csrftoken', 'ds_user_id'])
+            this.cookies = {
+              sessionid: sid.value,
+              csrftoken: csrf.value,
+              ds_user_id: uid.value,
+              extra: Object.fromEntries(
+                allCookies
+                  .filter(cookie => !coreCookies.has(cookie.name))
+                  .map(cookie => [cookie.name, cookie.value])
+              )
+            }
             storeSet('instagram', 'cookies', JSON.stringify(this.cookies))
             win.close()
             this.status = 'connected'
@@ -136,6 +167,8 @@ class InstagramService extends EventEmitter {
 
   async logout() {
     this.stopPolling()
+    if (this.webWindow && !this.webWindow.isDestroyed()) this.webWindow.close()
+    this.webWindow = null
     this.cookies = null
     this.status = 'disconnected'
     this.threads = []
@@ -157,31 +190,71 @@ class InstagramService extends EventEmitter {
   }
 
   async sendMessage(threadId: string, text: string) {
-    const form = new URLSearchParams()
-    form.append('text', text)
-    form.append('thread_ids', `["${threadId}"]`)
-    form.append('action', 'send_item')
-    const headers = {
-      'User-Agent': USER_AGENT,
-      'Accept': '*/*',
-      'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-      'X-IG-App-ID': IG_APP_ID,
-      'X-CSRFToken': this.cookies?.csrftoken ?? '',
-      'Cookie': this.cookieString(),
-      'Origin': BASE,
-      'Referer': `${BASE}/direct/inbox/`,
-      'Content-Type': 'application/x-www-form-urlencoded',
+    const window = await this.getWebWindow()
+    const result = await window.webContents.executeJavaScript(`
+      (async () => {
+        const threadId = ${JSON.stringify(threadId)};
+        const text = ${JSON.stringify(text)};
+        const html = document.documentElement.innerHTML;
+        const lsd = html.match(/\\["LSD",\\[\\],\\{"token":"([^"]+)"/)?.[1] || '';
+        const fbDtsg = html.match(/\\["DTSGInitialData",\\[\\],\\{"token":"([^"]+)"/)?.[1] || '';
+        const jazoest = String(2 + [...lsd].reduce((sum, char) => sum + char.charCodeAt(0), 0));
+        const variables = {
+          ig_thread_igid: threadId,
+          offline_threading_id: String(Date.now()) + String(Math.floor(Math.random() * 1000000)),
+          recipient_igids: null,
+          replied_to_client_context: null,
+          replied_to_item_id: null,
+          reply_to_message_id: null,
+          sampled: null,
+          text: { sensitive_string_value: text },
+          mentions: [],
+          mentioned_user_ids: [],
+          commands: null,
+          forwarded_from_thread_id: null,
+          is_forwarded_from_own_message: null,
+          send_attribution: 'igd_web_chat_tab:in_thread'
+        };
+        const form = new URLSearchParams({
+          fb_api_caller_class: 'RelayModern',
+          fb_api_req_friendly_name: 'IGDirectTextSendMutation',
+          server_timestamps: 'true',
+          lsd,
+          fb_dtsg: fbDtsg,
+          jazoest,
+          variables: JSON.stringify(variables),
+          doc_id: '26911679871773184'
+        });
+        const csrf = document.cookie.match(/(?:^|; )csrftoken=([^;]+)/)?.[1] || '';
+        const response = await fetch('/api/graphql', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-CSRFToken': decodeURIComponent(csrf),
+            'X-FB-Friendly-Name': 'IGDirectTextSendMutation',
+            'X-FB-LSD': lsd,
+            'X-IG-App-ID': '936619743392459',
+            'X-ASBD-ID': '359341'
+          },
+          body: form
+        });
+        return { status: response.status, body: await response.text() };
+      })()
+    `, true)
+    const { status, body } = result
+    debug.log('[IG] sendMessage response:', status, body)
+    if (status < 200 || status >= 300) {
+      throw new Error(`Instagram API ${status}: ${body}`)
     }
-    const res = await fetch(`${API}/direct_v2/threads/broadcast/text/`, {
-      method: 'POST',
-      body: form,
-      headers,
-      redirect: 'follow'
-    })
-    if (!res.ok) {
-      const body = await res.text()
-      debug.log('[IG] sendMessage response:', res.status, body)
-      throw new Error(`Instagram API ${res.status}: ${body}`)
+    try {
+      const data = JSON.parse(body)
+      if (data.errors?.length || !data.data?.xig_direct_text_send_with_slide_messaging_response) {
+        throw new Error(`Instagram API 400: ${body}`)
+      }
+    } catch (e: any) {
+      debug.log('[IG] sendMessage failed:', e?.message || e)
+      throw e
     }
   }
 
@@ -204,6 +277,7 @@ class InstagramService extends EventEmitter {
       console.log('[IG] threads count:', threads.length)
       this.threads = threads.map((t: any) => ({
         id: t.thread_id || t.threadId || t.id,
+        graphqlId: t.thread_v2_id || t.thread_igid || t.thread_pk || t.pk || t.thread_id || t.id,
         name: t.thread_title || t.users?.map((u: any) => u.username).join(', ') || 'Unknown',
         lastMessage: t.last_permanent_item?.text || t.last_item?.text || '',
         lastTimestamp: t.last_activity_at || t.last_item?.timestamp,

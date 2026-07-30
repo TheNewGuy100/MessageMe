@@ -150,6 +150,7 @@ class WhatsAppService extends events.EventEmitter {
   qrBase64 = null;
   status = "disconnected";
   chats = [];
+  contactNames = /* @__PURE__ */ new Map();
   messagesByChat = /* @__PURE__ */ new Map();
   initPromise = null;
   saveCreds = null;
@@ -180,6 +181,11 @@ class WhatsAppService extends events.EventEmitter {
     if (idx === -1) msgs.push(msg);
     else msgs[idx] = msg;
     if (msgs.length > 100) msgs.splice(0, msgs.length - 100);
+  }
+  mergeChat(chat) {
+    const contactName = this.contactNames.get(chat.id);
+    if (contactName && !chat.name) return { ...chat, name: contactName };
+    return chat;
   }
   async getProfilePicture(jid) {
     if (!this.sock) return null;
@@ -273,7 +279,8 @@ class WhatsAppService extends events.EventEmitter {
     });
     this.sock.ev.on("messaging-history.set", ({ chats, messages }) => {
       if (chats) {
-        for (const chat of chats) {
+        for (const rawChat of chats) {
+          const chat = this.mergeChat(rawChat);
           const idx = this.chats.findIndex((c) => c.id === chat.id);
           if (idx === -1) this.chats.push(chat);
         }
@@ -284,7 +291,8 @@ class WhatsAppService extends events.EventEmitter {
       this.emit("chatsUpdated", this.chats);
     });
     this.sock.ev.on("chats.upsert", (chats) => {
-      for (const chat of chats || []) {
+      for (const rawChat of chats || []) {
+        const chat = this.mergeChat(rawChat);
         const idx = this.chats.findIndex((c) => c.id === chat.id);
         if (idx === -1) this.chats.push(chat);
         else this.chats[idx] = { ...this.chats[idx], ...chat };
@@ -294,7 +302,27 @@ class WhatsAppService extends events.EventEmitter {
     this.sock.ev.on("chats.update", (updates) => {
       for (const update of updates || []) {
         const idx = this.chats.findIndex((c) => c.id === update.id);
-        if (idx !== -1) Object.assign(this.chats[idx], update);
+        if (idx !== -1) Object.assign(this.chats[idx], this.mergeChat(update));
+      }
+      this.emit("chatsUpdated", this.chats);
+    });
+    this.sock.ev.on("contacts.upsert", (contacts) => {
+      for (const contact of contacts || []) {
+        const name = contact.name || contact.notify || contact.verifiedName;
+        if (!contact.id || !name) continue;
+        this.contactNames.set(contact.id, name);
+        const chat = this.chats.find((item) => item.id === contact.id);
+        if (chat && !chat.name) chat.name = name;
+      }
+      this.emit("chatsUpdated", this.chats);
+    });
+    this.sock.ev.on("contacts.update", (updates) => {
+      for (const contact of updates || []) {
+        const name = contact.name || contact.notify || contact.verifiedName;
+        if (!contact.id || !name) continue;
+        this.contactNames.set(contact.id, name);
+        const chat = this.chats.find((item) => item.id === contact.id);
+        if (chat && !chat.name) chat.name = name;
       }
       this.emit("chatsUpdated", this.chats);
     });
@@ -332,6 +360,9 @@ class WhatsAppService extends events.EventEmitter {
     this.connecting = false;
     this.sock?.end(new Error("manual disconnect"));
     this.sock = null;
+    this.chats = [];
+    this.contactNames.clear();
+    this.messagesByChat.clear();
     this.setStatus("disconnected");
   }
 }
@@ -407,6 +438,7 @@ class InstagramService extends events.EventEmitter {
   status = "disconnected";
   threads = [];
   pollTimer = null;
+  webWindow = null;
   getStatus() {
     return this.status;
   }
@@ -415,7 +447,25 @@ class InstagramService extends events.EventEmitter {
   }
   cookieString() {
     if (!this.cookies) return "";
-    return `sessionid=${this.cookies.sessionid}; csrftoken=${this.cookies.csrftoken}; ds_user_id=${this.cookies.ds_user_id}`;
+    const cookies = {
+      ...this.cookies.extra,
+      sessionid: this.cookies.sessionid,
+      csrftoken: this.cookies.csrftoken,
+      ds_user_id: this.cookies.ds_user_id
+    };
+    return Object.entries(cookies).map(([name, value]) => `${name}=${value}`).join("; ");
+  }
+  async getWebWindow() {
+    if (this.webWindow && !this.webWindow.isDestroyed()) return this.webWindow;
+    this.webWindow = new electron.BrowserWindow({
+      show: false,
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true
+      }
+    });
+    await this.webWindow.loadURL(`${BASE}/direct/inbox/`);
+    return this.webWindow;
   }
   async igFetch(path2, options = {}) {
     const url = path2.startsWith("http") ? path2 : `${API}${path2}`;
@@ -467,7 +517,15 @@ class InstagramService extends events.EventEmitter {
           const csrf = allCookies.find((c) => c.name === "csrftoken");
           const uid = allCookies.find((c) => c.name === "ds_user_id");
           if (sid?.value && csrf?.value && uid?.value) {
-            this.cookies = { sessionid: sid.value, csrftoken: csrf.value, ds_user_id: uid.value };
+            const coreCookies = /* @__PURE__ */ new Set(["sessionid", "csrftoken", "ds_user_id"]);
+            this.cookies = {
+              sessionid: sid.value,
+              csrftoken: csrf.value,
+              ds_user_id: uid.value,
+              extra: Object.fromEntries(
+                allCookies.filter((cookie) => !coreCookies.has(cookie.name)).map((cookie) => [cookie.name, cookie.value])
+              )
+            };
             storeSet("instagram", "cookies", JSON.stringify(this.cookies));
             win.close();
             this.status = "connected";
@@ -513,6 +571,8 @@ class InstagramService extends events.EventEmitter {
   }
   async logout() {
     this.stopPolling();
+    if (this.webWindow && !this.webWindow.isDestroyed()) this.webWindow.close();
+    this.webWindow = null;
     this.cookies = null;
     this.status = "disconnected";
     this.threads = [];
@@ -532,31 +592,71 @@ class InstagramService extends events.EventEmitter {
     })).reverse();
   }
   async sendMessage(threadId, text) {
-    const form = new URLSearchParams();
-    form.append("text", text);
-    form.append("thread_ids", `["${threadId}"]`);
-    form.append("action", "send_item");
-    const headers = {
-      "User-Agent": USER_AGENT,
-      "Accept": "*/*",
-      "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-      "X-IG-App-ID": IG_APP_ID,
-      "X-CSRFToken": this.cookies?.csrftoken ?? "",
-      "Cookie": this.cookieString(),
-      "Origin": BASE,
-      "Referer": `${BASE}/direct/inbox/`,
-      "Content-Type": "application/x-www-form-urlencoded"
-    };
-    const res = await fetch(`${API}/direct_v2/threads/broadcast/text/`, {
-      method: "POST",
-      body: form,
-      headers,
-      redirect: "follow"
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      debug.log("[IG] sendMessage response:", res.status, body);
-      throw new Error(`Instagram API ${res.status}: ${body}`);
+    const window = await this.getWebWindow();
+    const result = await window.webContents.executeJavaScript(`
+      (async () => {
+        const threadId = ${JSON.stringify(threadId)};
+        const text = ${JSON.stringify(text)};
+        const html = document.documentElement.innerHTML;
+        const lsd = html.match(/\\["LSD",\\[\\],\\{"token":"([^"]+)"/)?.[1] || '';
+        const fbDtsg = html.match(/\\["DTSGInitialData",\\[\\],\\{"token":"([^"]+)"/)?.[1] || '';
+        const jazoest = String(2 + [...lsd].reduce((sum, char) => sum + char.charCodeAt(0), 0));
+        const variables = {
+          ig_thread_igid: threadId,
+          offline_threading_id: String(Date.now()) + String(Math.floor(Math.random() * 1000000)),
+          recipient_igids: null,
+          replied_to_client_context: null,
+          replied_to_item_id: null,
+          reply_to_message_id: null,
+          sampled: null,
+          text: { sensitive_string_value: text },
+          mentions: [],
+          mentioned_user_ids: [],
+          commands: null,
+          forwarded_from_thread_id: null,
+          is_forwarded_from_own_message: null,
+          send_attribution: 'igd_web_chat_tab:in_thread'
+        };
+        const form = new URLSearchParams({
+          fb_api_caller_class: 'RelayModern',
+          fb_api_req_friendly_name: 'IGDirectTextSendMutation',
+          server_timestamps: 'true',
+          lsd,
+          fb_dtsg: fbDtsg,
+          jazoest,
+          variables: JSON.stringify(variables),
+          doc_id: '26911679871773184'
+        });
+        const csrf = document.cookie.match(/(?:^|; )csrftoken=([^;]+)/)?.[1] || '';
+        const response = await fetch('/api/graphql', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'X-CSRFToken': decodeURIComponent(csrf),
+            'X-FB-Friendly-Name': 'IGDirectTextSendMutation',
+            'X-FB-LSD': lsd,
+            'X-IG-App-ID': '936619743392459',
+            'X-ASBD-ID': '359341'
+          },
+          body: form
+        });
+        return { status: response.status, body: await response.text() };
+      })()
+    `, true);
+    const { status, body } = result;
+    debug.log("[IG] sendMessage response:", status, body);
+    if (status < 200 || status >= 300) {
+      throw new Error(`Instagram API ${status}: ${body}`);
+    }
+    try {
+      const data = JSON.parse(body);
+      if (data.errors?.length || !data.data?.xig_direct_text_send_with_slide_messaging_response) {
+        throw new Error(`Instagram API 400: ${body}`);
+      }
+    } catch (e) {
+      debug.log("[IG] sendMessage failed:", e?.message || e);
+      throw e;
     }
   }
   async startPolling() {
@@ -579,6 +679,7 @@ class InstagramService extends events.EventEmitter {
       console.log("[IG] threads count:", threads.length);
       this.threads = threads.map((t) => ({
         id: t.thread_id || t.threadId || t.id,
+        graphqlId: t.thread_v2_id || t.thread_igid || t.thread_pk || t.pk || t.thread_id || t.id,
         name: t.thread_title || t.users?.map((u) => u.username).join(", ") || "Unknown",
         lastMessage: t.last_permanent_item?.text || t.last_item?.text || "",
         lastTimestamp: t.last_activity_at || t.last_item?.timestamp,

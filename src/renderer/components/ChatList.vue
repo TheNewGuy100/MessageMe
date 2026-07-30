@@ -5,6 +5,7 @@ import { formatRelativeTime, getName } from '@shared/utils'
 const props = defineProps<{
   chats: any[]
   selectedId?: string
+  platform: 'whatsapp' | 'instagram'
 }>()
 
 const emit = defineEmits<{ select: [chatId: string] }>()
@@ -17,7 +18,7 @@ watch(() => props.chats, async (chats) => {
     if (chat.id && !avatars.value[chat.id]) {
       if (chat.avatarUrl) {
         avatars.value[chat.id] = chat.avatarUrl
-      } else {
+      } else if (props.platform === 'whatsapp') {
         const url = await window.electronAPI.whatsapp.getProfilePicture(chat.id)
         if (url) avatars.value[chat.id] = url
       }
@@ -46,7 +47,7 @@ const filteredChats = computed(() => {
       >
         <div class="avatar">
           <img v-if="avatars[chat.id]" :src="avatars[chat.id]" class="avatar-img" />
-          <span v-else>{{ getName(chat)[0].toUpperCase() }}</span>
+          <span v-else>{{ getName(chat).charAt(0).toUpperCase() }}</span>
         </div>
         <div class="info">
           <div class="name">{{ getName(chat) }}</div>

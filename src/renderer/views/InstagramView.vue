@@ -6,11 +6,14 @@ import MessageView from '@/components/MessageView.vue'
 const status = ref<'disconnected' | 'connected'>('disconnected')
 const loading = ref(false)
 const loadingThreads = ref(false)
+const loadingMessages = ref(false)
 const error = ref('')
 const threads = ref<any[]>([])
 const messages = ref<any[]>([])
 const sending = ref(false)
+const sendError = ref('')
 const selectedThread = ref<string | null>(null)
+const selectedThreadGraphqlId = ref<string | null>(null)
 const selectedThreadName = ref('')
 
 const prefix = 'instagram'
@@ -35,27 +38,40 @@ async function handleLogout() {
   threads.value = []
   messages.value = []
   selectedThread.value = null
+  selectedThreadGraphqlId.value = null
 }
 
 async function loadThreads() {
   loadingThreads.value = true
-  threads.value = await api.getThreads()
-  loadingThreads.value = false
+  try {
+    threads.value = await api.getThreads()
+  } finally {
+    loadingThreads.value = false
+  }
 }
 
 async function selectThread(threadId: string) {
   selectedThread.value = threadId
   const t = threads.value.find(th => th.id === threadId)
+  selectedThreadGraphqlId.value = t?.graphqlId || threadId
   selectedThreadName.value = t?.name || threadId
-  messages.value = await api.getMessages(threadId)
+  loadingMessages.value = true
+  try {
+    messages.value = await api.getMessages(threadId)
+  } finally {
+    loadingMessages.value = false
+  }
 }
 
 async function sendMessage(text: string) {
   if (!selectedThread.value) return
+  sendError.value = ''
   sending.value = true
   try {
-    await api.sendMessage(selectedThread.value, text)
+    await api.sendMessage(selectedThreadGraphqlId.value || selectedThread.value, text)
     messages.value = await api.getMessages(selectedThread.value)
+  } catch (e: any) {
+    sendError.value = e?.message || 'Não foi possível enviar a mensagem'
   } finally {
     sending.value = false
   }
@@ -73,7 +89,15 @@ function onMessage(msg: any) {
 
 onMounted(async () => {
   window.electronAPI.onEvent(`${prefix}:connected`, () => { status.value = 'connected'; loadingThreads.value = true; loadThreads() })
-  window.electronAPI.onEvent(`${prefix}:disconnected`, () => { status.value = 'disconnected'; threads.value = []; messages.value = []; selectedThread.value = null })
+  window.electronAPI.onEvent(`${prefix}:disconnected`, () => {
+    status.value = 'disconnected'
+    loadingThreads.value = false
+    loadingMessages.value = false
+    threads.value = []
+    messages.value = []
+    selectedThread.value = null
+    selectedThreadGraphqlId.value = null
+  })
   window.electronAPI.onEvent(`${prefix}:message`, onMessage)
   window.electronAPI.onEvent(`${prefix}:threadsUpdated`, onThreadsUpdated)
 
@@ -105,20 +129,23 @@ onUnmounted(() => {
     </div>
     <div v-else class="content">
       <div class="sidebar-area">
-        <div v-if="loadingThreads && threads.length === 0" class="list-loading">
+        <div v-if="loadingThreads" class="list-loading">
           <span class="list-spinner"></span>
         </div>
         <ChatList
           v-else
           :chats="threads"
+          platform="instagram"
           :selected-id="selectedThread ?? undefined"
           @select="selectThread"
         />
       </div>
       <div v-if="selectedThread" class="chat-area">
+        <p v-if="sendError" class="send-error">{{ sendError }}</p>
         <MessageView
           :messages="messages"
           :chat-name="selectedThreadName"
+          :loading="loadingMessages"
           :sending="sending"
           @send="sendMessage"
         />
@@ -193,7 +220,10 @@ onUnmounted(() => {
 
 .chat-area {
   flex: 1;
+  min-height: 0;
+  min-width: 0;
   display: flex;
+  flex-direction: column;
 }
 
 .empty-state {
@@ -216,5 +246,11 @@ onUnmounted(() => {
 
 .list-spinner {
   @include spinner;
+}
+
+.send-error {
+  margin: 8px 16px 0;
+  color: $text-error;
+  font-size: 12px;
 }
 </style>

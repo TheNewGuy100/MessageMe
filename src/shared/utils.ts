@@ -31,7 +31,7 @@ export function formatRelativeTime(ts: number | string | undefined): string {
 }
 
 export function getName(chat: any): string {
-  return chat.name || chat.subject || chat.id?.split('@')[0]?.replace(/[^0-9]/g, '') || 'Unknown'
+  return chat.name || chat.notify || chat.verifiedName || chat.subject || chat.id?.split('@')[0]?.replace(/[^0-9]/g, '') || 'Unknown'
 }
 
 export function getText(msg: any): string {

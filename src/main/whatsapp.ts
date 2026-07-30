@@ -28,6 +28,7 @@ class WhatsAppService extends EventEmitter {
   private qrBase64: string | null = null
   private status: 'disconnected' | 'connecting' | 'connected' = 'disconnected'
   private chats: any[] = []
+  private contactNames: Map<string, string> = new Map()
   private messagesByChat: Map<string, any[]> = new Map()
   private initPromise: Promise<void> | null = null
   private saveCreds: (() => void) | null = null
@@ -52,6 +53,12 @@ class WhatsAppService extends EventEmitter {
     if (idx === -1) msgs.push(msg)
     else msgs[idx] = msg
     if (msgs.length > 100) msgs.splice(0, msgs.length - 100)
+  }
+
+  private mergeChat(chat: any) {
+    const contactName = this.contactNames.get(chat.id)
+    if (contactName && !chat.name) return { ...chat, name: contactName }
+    return chat
   }
 
   async getProfilePicture(jid: string) {
@@ -157,7 +164,8 @@ class WhatsAppService extends EventEmitter {
 
     this.sock.ev.on('messaging-history.set', ({ chats, messages }: any) => {
       if (chats) {
-        for (const chat of chats) {
+        for (const rawChat of chats) {
+          const chat = this.mergeChat(rawChat)
           const idx = this.chats.findIndex(c => c.id === chat.id)
           if (idx === -1) this.chats.push(chat)
         }
@@ -169,7 +177,8 @@ class WhatsAppService extends EventEmitter {
     })
 
     this.sock.ev.on('chats.upsert', (chats: any[]) => {
-      for (const chat of chats || []) {
+      for (const rawChat of chats || []) {
+        const chat = this.mergeChat(rawChat)
         const idx = this.chats.findIndex(c => c.id === chat.id)
         if (idx === -1) this.chats.push(chat)
         else this.chats[idx] = { ...this.chats[idx], ...chat }
@@ -180,7 +189,29 @@ class WhatsAppService extends EventEmitter {
     this.sock.ev.on('chats.update', (updates: any[]) => {
       for (const update of updates || []) {
         const idx = this.chats.findIndex(c => c.id === update.id)
-        if (idx !== -1) Object.assign(this.chats[idx], update)
+        if (idx !== -1) Object.assign(this.chats[idx], this.mergeChat(update))
+      }
+      this.emit('chatsUpdated', this.chats)
+    })
+
+    this.sock.ev.on('contacts.upsert', (contacts: any[]) => {
+      for (const contact of contacts || []) {
+        const name = contact.name || contact.notify || contact.verifiedName
+        if (!contact.id || !name) continue
+        this.contactNames.set(contact.id, name)
+        const chat = this.chats.find(item => item.id === contact.id)
+        if (chat && !chat.name) chat.name = name
+      }
+      this.emit('chatsUpdated', this.chats)
+    })
+
+    this.sock.ev.on('contacts.update', (updates: any[]) => {
+      for (const contact of updates || []) {
+        const name = contact.name || contact.notify || contact.verifiedName
+        if (!contact.id || !name) continue
+        this.contactNames.set(contact.id, name)
+        const chat = this.chats.find(item => item.id === contact.id)
+        if (chat && !chat.name) chat.name = name
       }
       this.emit('chatsUpdated', this.chats)
     })
@@ -217,6 +248,9 @@ class WhatsAppService extends EventEmitter {
     this.connecting = false
     this.sock?.end(new Error('manual disconnect'))
     this.sock = null
+    this.chats = []
+    this.contactNames.clear()
+    this.messagesByChat.clear()
     this.setStatus('disconnected')
   }
 }
