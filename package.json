@@ -1,0 +1,29 @@
+{
+  "name": "message-manager",
+  "version": "0.1.0",
+  "description": "Gerenciador de mensagens WhatsApp e Instagram",
+  "main": "./out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "better-sqlite3": "^13.0.2",
+    "pino": "^10.3.1",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^6.0.8",
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "6.0.0-beta.1",
+    "pinia": "^4.0.2",
+    "typescript": "^7.0.2",
+    "vite": "^7.0.0",
+    "vue": "^3.5.40",
+    "vue-router": "^5.2.0",
+    "vue-tsc": "^3.3.8"
+  }
+}
