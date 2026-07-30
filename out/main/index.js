@@ -336,10 +336,10 @@ class WhatsAppService extends events.EventEmitter {
   }
 }
 const whatsappService = new WhatsAppService();
-const IG_APP_ID = "936619743392459";
-const BASE = "https://www.instagram.com";
+const IG_APP_ID = process.env.IG_APP_ID || "936619743392459";
+const BASE = process.env.IG_BASE_URL || "https://www.instagram.com";
 const API = `${BASE}/api/v1`;
-const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
+const USER_AGENT = process.env.IG_USER_AGENT || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
 class InstagramService extends events.EventEmitter {
   cookies = null;
   status = "disconnected";
@@ -365,13 +365,16 @@ class InstagramService extends events.EventEmitter {
       "X-CSRFToken": this.cookies?.csrftoken ?? "",
       "Cookie": this.cookieString(),
       "Origin": BASE,
-      "Referer": `${BASE}/direct/inbox/`,
-      "Sec-Fetch-Site": "same-origin"
+      "Referer": `${BASE}/`,
+      "Sec-Fetch-Site": "cross-site",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Dest": "empty",
+      "Accept-Encoding": "gzip, deflate, br"
     };
     if (options.body && !(options.body instanceof URLSearchParams)) {
       headers["Content-Type"] = "application/x-www-form-urlencoded";
     }
-    const res = await fetch(url, { ...options, headers: { ...headers, ...options.headers } });
+    const res = await fetch(url, { ...options, headers: { ...headers, ...options.headers }, redirect: "follow" });
     if (!res.ok) throw new Error(`Instagram API ${res.status}: ${await res.text()}`);
     return res.json();
   }
@@ -465,10 +468,42 @@ class InstagramService extends events.EventEmitter {
     form.append("text", text);
     form.append("thread_ids", `["${threadId}"]`);
     form.append("action", "send_item");
-    await this.igFetch("/direct_v2/threads/broadcast/text/", {
-      method: "POST",
-      body: form
+    const makeHeaders = (host) => ({
+      "User-Agent": USER_AGENT,
+      "Accept": "*/*",
+      "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+      "X-IG-App-ID": IG_APP_ID,
+      "X-CSRFToken": this.cookies?.csrftoken ?? "",
+      "Cookie": this.cookieString(),
+      "X-Requested-With": "XMLHttpRequest",
+      "Origin": BASE,
+      "Referer": `${BASE}/direct/inbox/`,
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Host": host
     });
+    let res = await fetch(`${API}/direct_v2/threads/broadcast/text/`, {
+      method: "POST",
+      body: form,
+      headers: makeHeaders("www.instagram.com"),
+      redirect: "manual"
+    });
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      console.log("[IG] sendMessage redirect to:", location, "status:", res.status);
+      if (location) {
+        res = await fetch(location.startsWith("http") ? location : `https://i.instagram.com${location}`, {
+          method: "POST",
+          body: form,
+          headers: makeHeaders("i.instagram.com"),
+          redirect: "error"
+        });
+      }
+    }
+    if (!res.ok) {
+      const body = await res.text();
+      console.log("[IG] sendMessage response:", res.status, body);
+      throw new Error(`Instagram API ${res.status}: ${body}`);
+    }
   }
   async startPolling() {
     await this.loadThreads();

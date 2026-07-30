@@ -4,6 +4,7 @@ import { ref } from 'vue'
 const props = defineProps<{
   messages: any[]
   chatName: string
+  sending?: boolean
 }>()
 
 const emit = defineEmits<{ send: [text: string] }>()
@@ -11,7 +12,8 @@ const inputText = ref('')
 
 function formatTime(ts: number | undefined) {
   if (!ts) return ''
-  const d = new Date(typeof ts === 'number' ? ts * 1000 : ts)
+  const ms = typeof ts === 'number' && ts > 1e11 ? ts : ts * 1000
+  const d = new Date(ms)
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
@@ -61,21 +63,23 @@ function handleSend() {
         placeholder="Digite uma mensagem..."
         @keydown.enter="handleSend"
       />
-      <button @click="handleSend" :disabled="!inputText.trim()">Enviar</button>
+      <button @click="handleSend" :disabled="!inputText.trim() || sending">
+        <span v-if="sending" class="spinner"></span>
+        <span v-else>Enviar</span>
+      </button>
     </div>
   </div>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
 .message-view {
   flex: 1;
-  display: flex;
-  flex-direction: column;
+  @include flex-column;
 }
 
 .header {
   padding: 12px 16px;
-  border-bottom: 1px solid #2a2a2a;
+  border-bottom: 1px solid $border-color;
   font-weight: 600;
   font-size: 15px;
 }
@@ -84,29 +88,19 @@ function handleSend() {
   flex: 1;
   overflow-y: auto;
   padding: 16px;
-  display: flex;
-  flex-direction: column;
+  @include flex-column;
   gap: 6px;
 }
 
-.message {
-  display: flex;
-}
-
-.message.mine {
-  justify-content: flex-end;
-}
+.message { display: flex; }
+.message.mine { justify-content: flex-end; }
 
 .bubble {
-  max-width: 70%;
-  padding: 8px 14px;
-  border-radius: 16px;
-  background: #262626;
-  position: relative;
+  @include bubble-message;
 }
 
 .mine .bubble {
-  background: #00e67620;
+  background: $bg-accent-20;
   border-bottom-right-radius: 4px;
 }
 
@@ -118,7 +112,7 @@ function handleSend() {
 
 .bubble .time {
   font-size: 10px;
-  color: #888;
+  color: $text-secondary;
   float: right;
   margin-left: 12px;
   margin-top: 4px;
@@ -128,37 +122,33 @@ function handleSend() {
   display: flex;
   gap: 8px;
   padding: 12px 16px;
-  border-top: 1px solid #2a2a2a;
+  border-top: 1px solid $border-color;
 }
 
 .input-area input {
   flex: 1;
-  padding: 10px 14px;
-  border: 1px solid #333;
-  border-radius: 24px;
-  background: #222;
-  color: #e0e0e0;
-  font-size: 14px;
-  outline: none;
-}
-
-.input-area input:focus {
-  border-color: #00e676;
+  @include input-dark(10px 14px, 14px);
+  border-radius: $radius-round;
 }
 
 .input-area button {
   padding: 10px 20px;
   border: none;
-  border-radius: 24px;
-  background: #00e676;
+  border-radius: $radius-round;
+  background: $accent;
   color: #111;
   font-weight: 600;
   cursor: pointer;
-  transition: opacity 0.2s;
+  transition: opacity $transition-normal;
 }
 
 .input-area button:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+.spinner {
+  display: inline-block;
+  @include spinner(14px, 2px, #111, transparent);
 }
 </style>

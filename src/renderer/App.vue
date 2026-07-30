@@ -15,19 +15,8 @@ import Sidebar from '@/components/Sidebar.vue'
   </div>
 </template>
 
-<style>
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
-}
-
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #111;
-  color: #e0e0e0;
-  overflow: hidden;
-}
+<style lang="scss">
+@use '@shared/styles/base';
 
 .app {
   display: flex;

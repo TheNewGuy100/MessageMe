@@ -5,9 +5,11 @@ import MessageView from '@/components/MessageView.vue'
 
 const status = ref<'disconnected' | 'connected'>('disconnected')
 const loading = ref(false)
+const loadingThreads = ref(false)
 const error = ref('')
 const threads = ref<any[]>([])
 const messages = ref<any[]>([])
+const sending = ref(false)
 const selectedThread = ref<string | null>(null)
 const selectedThreadName = ref('')
 
@@ -35,7 +37,11 @@ async function handleLogout() {
   selectedThread.value = null
 }
 
-async function loadThreads() { threads.value = await api.getThreads() }
+async function loadThreads() {
+  loadingThreads.value = true
+  threads.value = await api.getThreads()
+  loadingThreads.value = false
+}
 
 async function selectThread(threadId: string) {
   selectedThread.value = threadId
@@ -46,11 +52,19 @@ async function selectThread(threadId: string) {
 
 async function sendMessage(text: string) {
   if (!selectedThread.value) return
-  await api.sendMessage(selectedThread.value, text)
-  messages.value = await api.getMessages(selectedThread.value)
+  sending.value = true
+  try {
+    await api.sendMessage(selectedThread.value, text)
+    messages.value = await api.getMessages(selectedThread.value)
+  } finally {
+    sending.value = false
+  }
 }
 
-function onThreadsUpdated(updated: any[]) { threads.value = updated }
+function onThreadsUpdated(updated: any[]) {
+  loadingThreads.value = false
+  threads.value = updated
+}
 function onMessage(msg: any) {
   if (msg.threadId === selectedThread.value) {
     api.getMessages(selectedThread.value!).then(m => { messages.value = m })
@@ -58,7 +72,7 @@ function onMessage(msg: any) {
 }
 
 onMounted(async () => {
-  window.electronAPI.onEvent(`${prefix}:connected`, () => { status.value = 'connected'; loadThreads() })
+  window.electronAPI.onEvent(`${prefix}:connected`, () => { status.value = 'connected'; loadingThreads.value = true; loadThreads() })
   window.electronAPI.onEvent(`${prefix}:disconnected`, () => { status.value = 'disconnected'; threads.value = []; messages.value = []; selectedThread.value = null })
   window.electronAPI.onEvent(`${prefix}:message`, onMessage)
   window.electronAPI.onEvent(`${prefix}:threadsUpdated`, onThreadsUpdated)
@@ -90,15 +104,22 @@ onUnmounted(() => {
       </div>
     </div>
     <div v-else class="content">
-      <ChatList
-        :chats="threads"
-        :selected-id="selectedThread ?? undefined"
-        @select="selectThread"
-      />
+      <div class="sidebar-area">
+        <div v-if="loadingThreads && threads.length === 0" class="list-loading">
+          <span class="list-spinner"></span>
+        </div>
+        <ChatList
+          v-else
+          :chats="threads"
+          :selected-id="selectedThread ?? undefined"
+          @select="selectThread"
+        />
+      </div>
       <div v-if="selectedThread" class="chat-area">
         <MessageView
           :messages="messages"
           :chat-name="selectedThreadName"
+          :sending="sending"
           @send="sendMessage"
         />
       </div>
@@ -109,18 +130,14 @@ onUnmounted(() => {
   </div>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
 .platform-view {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
+  @include flex-fill;
 }
 
 .login-area {
   flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  @include flex-center;
 }
 
 .login-form {
@@ -129,32 +146,30 @@ onUnmounted(() => {
   gap: 12px;
   width: 380px;
   padding: 32px;
-  background: #1a1a1a;
-  border-radius: 12px;
-  border: 1px solid #2a2a2a;
+  background: $bg-secondary;
+  border-radius: $radius-lg;
+  border: 1px solid $border-color;
   text-align: center;
 }
 
-.login-form h2 {
-  margin-bottom: 4px;
-}
+.login-form h2 { margin-bottom: 4px; }
 
 .login-form p {
-  color: #888;
+  color: $text-secondary;
   font-size: 13px;
 }
 
 .note {
   font-size: 12px !important;
   line-height: 1.5;
-  color: #666 !important;
+  color: $text-muted !important;
 }
 
 .login-form button {
   padding: 10px;
   border: none;
-  border-radius: 8px;
-  background: #e1306c;
+  border-radius: $radius-md;
+  background: $instagram;
   color: white;
   font-weight: 600;
   cursor: pointer;
@@ -162,18 +177,12 @@ onUnmounted(() => {
   font-size: 14px;
 }
 
-.login-form button:hover {
-  background: #c92d61;
-}
-
-.login-form button:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
+.login-form button:hover { background: $instagram-hover; }
+.login-form button:disabled { opacity: 0.4; cursor: default; }
 
 .error {
-  color: #ff5252 !important;
-  font-size: 12px;
+  color: $text-error !important;
+  font-size: 12px !important;
 }
 
 .content {
@@ -189,10 +198,23 @@ onUnmounted(() => {
 
 .empty-state {
   flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #666;
+  @include flex-center;
+  color: $text-muted;
   font-size: 15px;
+}
+
+.sidebar-area {
+  width: $chatlist-width;
+  border-right: 1px solid $border-color;
+  @include flex-column;
+}
+
+.list-loading {
+  flex: 1;
+  @include flex-center;
+}
+
+.list-spinner {
+  @include spinner;
 }
 </style>

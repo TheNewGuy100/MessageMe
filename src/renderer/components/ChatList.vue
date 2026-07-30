@@ -56,38 +56,28 @@ function getName(chat: any) {
   </div>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
 .chat-list {
-  width: 320px;
-  border-right: 1px solid #2a2a2a;
-  display: flex;
-  flex-direction: column;
-  background: #161616;
+  width: $chatlist-width;
+  border-right: 1px solid $border-color;
+  @include flex-column;
+  background: $bg-chatlist;
 }
 
 .search {
   padding: 12px;
-  border-bottom: 1px solid #2a2a2a;
+  border-bottom: 1px solid $border-color;
 }
 
 .search input {
   width: 100%;
-  padding: 8px 12px;
-  border: 1px solid #333;
-  border-radius: 8px;
-  background: #222;
-  color: #e0e0e0;
-  font-size: 13px;
-  outline: none;
-}
-
-.search input:focus {
-  border-color: #00e676;
+  @include input-dark;
 }
 
 .list {
   flex: 1;
   overflow-y: auto;
+  @include scrollbar-dark;
 }
 
 .chat-item {
@@ -96,21 +86,19 @@ function getName(chat: any) {
   gap: 12px;
   padding: 12px 16px;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background $transition-fast;
 }
 
-.chat-item:hover { background: #1e1e1e; }
-.chat-item.selected { background: #00e67610; }
+.chat-item:hover { background: $bg-hover; }
+.chat-item.selected { background: $bg-accent-10; }
 
 .avatar {
   width: 42px;
   height: 42px;
-  border-radius: 50%;
-  background: #00e676;
+  border-radius: $radius-full;
+  background: $accent;
   color: #111;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  @include flex-center;
   font-weight: 700;
   font-size: 18px;
   flex-shrink: 0;
@@ -131,21 +119,19 @@ function getName(chat: any) {
 .name {
   font-size: 14px;
   font-weight: 500;
-  color: #e0e0e0;
+  color: $text-primary;
 }
 
 .last-msg {
   font-size: 12px;
-  color: #888;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  color: $text-secondary;
+  @include text-ellipsis;
   margin-top: 2px;
 }
 
 .time {
   font-size: 11px;
-  color: #666;
+  color: $text-muted;
   flex-shrink: 0;
 }
 </style>

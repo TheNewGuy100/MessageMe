@@ -60,16 +60,14 @@ async function retry() {
   </div>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
 .qr-login {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  @include flex-center;
   flex: 1;
 }
 
 .loading {
-  color: #888;
+  color: $text-secondary;
   font-size: 16px;
 }
 
@@ -79,46 +77,32 @@ async function retry() {
 
 .qr-container h2 {
   margin-bottom: 8px;
-  color: #e0e0e0;
+  color: $text-primary;
 }
 
 .qr-container p {
-  color: #888;
+  color: $text-secondary;
   margin-bottom: 24px;
   font-size: 14px;
 }
 
 .qr-container img {
-  border-radius: 12px;
+  border-radius: $radius-lg;
   background: white;
   padding: 16px;
   width: 280px;
   height: 280px;
 }
 
-.error-container {
-  text-align: center;
-}
+.error-container { text-align: center; }
 
 .error-text {
-  color: #ff5252;
+  color: $text-error;
   font-size: 14px;
   margin-bottom: 16px;
 }
 
 .retry-btn {
-  padding: 10px 24px;
-  border: none;
-  border-radius: 8px;
-  background: #00e676;
-  color: #111;
-  font-weight: 600;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 14px;
-}
-
-.retry-btn:hover {
-  background: #00c853;
+  @include button-accent;
 }
 </style>

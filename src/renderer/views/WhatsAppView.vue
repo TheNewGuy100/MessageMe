@@ -80,11 +80,9 @@ onUnmounted(() => {
   </div>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
 .platform-view {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
+  @include flex-fill;
 }
 
 .chat-area {
@@ -94,10 +92,8 @@ onUnmounted(() => {
 
 .empty-state {
   flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #666;
+  @include flex-center;
+  color: $text-muted;
   font-size: 15px;
 }
 </style>

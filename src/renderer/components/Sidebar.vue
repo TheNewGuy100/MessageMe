@@ -65,13 +65,12 @@ onUnmounted(() => {
   </aside>
 </template>
 
-<style scoped>
+<style scoped lang="scss">
 .sidebar {
-  width: 200px;
-  background: #1a1a1a;
-  border-right: 1px solid #2a2a2a;
-  display: flex;
-  flex-direction: column;
+  width: $sidebar-width;
+  background: $bg-secondary;
+  border-right: 1px solid $border-color;
+  @include flex-column;
   padding: 16px 0;
 }
 
@@ -80,13 +79,12 @@ onUnmounted(() => {
   font-weight: 700;
   text-align: center;
   padding: 8px 16px 24px;
-  color: #00e676;
+  color: $accent;
   letter-spacing: 2px;
 }
 
 nav {
-  display: flex;
-  flex-direction: column;
+  @include flex-column;
   gap: 4px;
   padding: 0 8px;
   flex: 1;
@@ -102,74 +100,69 @@ button {
   color: #999;
   font-size: 14px;
   cursor: pointer;
-  border-radius: 8px;
-  transition: all 0.2s;
+  border-radius: $radius-md;
+  transition: all $transition-normal;
   font-family: inherit;
 }
 
 button:hover {
-  background: #2a2a2a;
-  color: #e0e0e0;
+  background: $bg-hover;
+  color: $text-primary;
 }
 
 button.active {
-  background: #00e67618;
-  color: #00e676;
+  background: $bg-accent-18;
+  color: $accent;
 }
 
 .dot {
   width: 10px;
   height: 10px;
-  border-radius: 50%;
+  border-radius: $radius-full;
   flex-shrink: 0;
   box-shadow: 0 0 4px currentColor;
   margin-left: auto;
 }
 
-.icon {
-  font-size: 16px;
-}
-
-.label {
-  font-weight: 500;
-}
+.icon { font-size: 16px; }
+.label { font-weight: 500; }
 
 .bottom {
   padding: 8px;
-  border-top: 1px solid #2a2a2a;
+  border-top: 1px solid $border-color;
   margin-top: auto;
 }
 
 .clear-btn {
   width: 100%;
   justify-content: center;
-  background: #8f0000;
+  background: $danger;
   color: #fff;
   font-weight: 700;
   font-size: 13px;
   padding: 8px;
-  border-radius: 6px;
+  border-radius: $radius-sm;
   margin-bottom: 6px;
 }
 
 .clear-btn:hover {
-  background: #b50000;
+  background: $danger-hover;
   color: #fff;
 }
 
 .refresh-btn {
   width: 100%;
   justify-content: center;
-  background: #008f4c;
+  background: $action;
   color: #fff;
   font-weight: 700;
   font-size: 13px;
   padding: 8px;
-  border-radius: 6px;
+  border-radius: $radius-sm;
 }
 
 .refresh-btn:hover {
-  background: #00a85a;
+  background: $action-hover;
   color: #fff;
 }
 </style>
