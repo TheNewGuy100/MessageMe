@@ -336,6 +336,68 @@ class WhatsAppService extends events.EventEmitter {
   }
 }
 const whatsappService = new WhatsAppService();
+let enabled = false;
+const toggleListeners = [];
+function timestamp() {
+  return (/* @__PURE__ */ new Date()).toLocaleTimeString("pt-BR");
+}
+function toWindows(event, ...args) {
+  electron.BrowserWindow.getAllWindows().forEach((w) => w.webContents.send(event, ...args));
+}
+function notifyToggle() {
+  toggleListeners.forEach((fn) => fn(enabled));
+}
+const debug = {
+  get enabled() {
+    return enabled;
+  },
+  enable() {
+    if (enabled) return;
+    enabled = true;
+    console.log("[DEBUG] modo debug ativado");
+    toWindows("debug:log", "[DEBUG] modo debug ativado");
+    notifyToggle();
+  },
+  disable() {
+    if (!enabled) return;
+    console.log("[DEBUG] modo debug desativado");
+    toWindows("debug:log", "[DEBUG] modo debug desativado");
+    enabled = false;
+    notifyToggle();
+  },
+  send(type, ...args) {
+    if (!enabled) return;
+    const tag = `[${timestamp()}]`;
+    if (type === "error") {
+      console.error(tag, ...args);
+      toWindows("debug:error", tag, ...args);
+    } else {
+      console.log(tag, ...args);
+      toWindows("debug:log", tag, ...args);
+    }
+  },
+  log(...args) {
+    debug.send("log", ...args);
+  },
+  error(...args) {
+    debug.send("error", ...args);
+  },
+  ipc(channel, direction, data) {
+    if (!enabled) return;
+    const prefix = direction === "send" ? ">>" : direction === "result" ? "<<" : "!!";
+    const tag = `[${timestamp()}] [IPC] ${prefix} ${channel}`;
+    console.log(tag, data !== void 0 ? data : "");
+    toWindows("debug:ipc", { channel, direction, data, tag });
+  },
+  onToggle(fn) {
+    toggleListeners.push(fn);
+  }
+};
+function watchDevtools(window) {
+  window.webContents.on("devtools-opened", () => debug.enable());
+  window.webContents.on("devtools-closed", () => debug.disable());
+  if (window.webContents.isDevToolsOpened()) debug.enable();
+}
 const IG_APP_ID = process.env.IG_APP_ID || "936619743392459";
 const BASE = process.env.IG_BASE_URL || "https://www.instagram.com";
 const API = `${BASE}/api/v1`;
@@ -357,6 +419,7 @@ class InstagramService extends events.EventEmitter {
   }
   async igFetch(path2, options = {}) {
     const url = path2.startsWith("http") ? path2 : `${API}${path2}`;
+    debug.log("[IG] fetch", options.method || "GET", url);
     const headers = {
       "User-Agent": USER_AGENT,
       "Accept": "*/*",
@@ -375,7 +438,12 @@ class InstagramService extends events.EventEmitter {
       headers["Content-Type"] = "application/x-www-form-urlencoded";
     }
     const res = await fetch(url, { ...options, headers: { ...headers, ...options.headers }, redirect: "follow" });
-    if (!res.ok) throw new Error(`Instagram API ${res.status}: ${await res.text()}`);
+    debug.log("[IG] response", res.status, res.statusText);
+    if (!res.ok) {
+      const text = await res.text();
+      debug.log("[IG] error body", text);
+      throw new Error(`Instagram API ${res.status}: ${text}`);
+    }
     return res.json();
   }
   async loginWithBrowser() {
@@ -468,40 +536,26 @@ class InstagramService extends events.EventEmitter {
     form.append("text", text);
     form.append("thread_ids", `["${threadId}"]`);
     form.append("action", "send_item");
-    const makeHeaders = (host) => ({
+    const headers = {
       "User-Agent": USER_AGENT,
       "Accept": "*/*",
       "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
       "X-IG-App-ID": IG_APP_ID,
       "X-CSRFToken": this.cookies?.csrftoken ?? "",
       "Cookie": this.cookieString(),
-      "X-Requested-With": "XMLHttpRequest",
       "Origin": BASE,
       "Referer": `${BASE}/direct/inbox/`,
-      "Content-Type": "application/x-www-form-urlencoded",
-      "Host": host
-    });
-    let res = await fetch(`${API}/direct_v2/threads/broadcast/text/`, {
+      "Content-Type": "application/x-www-form-urlencoded"
+    };
+    const res = await fetch(`${API}/direct_v2/threads/broadcast/text/`, {
       method: "POST",
       body: form,
-      headers: makeHeaders("www.instagram.com"),
-      redirect: "manual"
+      headers,
+      redirect: "follow"
     });
-    if (res.status >= 300 && res.status < 400) {
-      const location = res.headers.get("location");
-      console.log("[IG] sendMessage redirect to:", location, "status:", res.status);
-      if (location) {
-        res = await fetch(location.startsWith("http") ? location : `https://i.instagram.com${location}`, {
-          method: "POST",
-          body: form,
-          headers: makeHeaders("i.instagram.com"),
-          redirect: "error"
-        });
-      }
-    }
     if (!res.ok) {
       const body = await res.text();
-      console.log("[IG] sendMessage response:", res.status, body);
+      debug.log("[IG] sendMessage response:", res.status, body);
       throw new Error(`Instagram API ${res.status}: ${body}`);
     }
   }
@@ -528,17 +582,31 @@ class InstagramService extends events.EventEmitter {
         name: t.thread_title || t.users?.map((u) => u.username).join(", ") || "Unknown",
         lastMessage: t.last_permanent_item?.text || t.last_item?.text || "",
         lastTimestamp: t.last_activity_at || t.last_item?.timestamp,
-        unread: t.has_newer
+        unread: t.has_newer,
+        avatarUrl: t.users?.[0]?.profile_pic_url || ""
       }));
       this.emit("threadsUpdated", this.threads);
     } catch (e) {
-      console.log("[IG] erro loadThreads:", e);
+      debug.log("[IG] erro loadThreads:", e);
     }
   }
 }
 const instagramService = new InstagramService();
 function broadcast(event, ...args) {
   electron.BrowserWindow.getAllWindows().forEach((w) => w.webContents.send(event, ...args));
+}
+function handle(channel, fn) {
+  electron.ipcMain.handle(channel, async (_e, ...args) => {
+    debug.ipc(channel, "send", args.length ? args : void 0);
+    try {
+      const result = await fn(...args);
+      debug.ipc(channel, "result", result !== void 0 ? result : "ok");
+      return result;
+    } catch (e) {
+      debug.ipc(channel, "error", e?.message || e);
+      throw e;
+    }
+  });
 }
 function registerIpcHandlers() {
   whatsappService.on("connecting", () => broadcast("whatsapp:connecting"));
@@ -548,47 +616,47 @@ function registerIpcHandlers() {
   whatsappService.on("error", (msg) => broadcast("whatsapp:error", msg));
   whatsappService.on("message", (msg) => broadcast("whatsapp:message", msg));
   whatsappService.on("chatsUpdated", (chats) => broadcast("whatsapp:chatsUpdated", chats));
-  electron.ipcMain.handle("whatsapp:getStatus", () => whatsappService.getStatus());
-  electron.ipcMain.handle("whatsapp:getQRCode", () => whatsappService.getQRCode());
-  electron.ipcMain.handle("whatsapp:connect", () => whatsappService.connect());
-  electron.ipcMain.handle("whatsapp:disconnect", () => whatsappService.disconnect());
-  electron.ipcMain.handle("whatsapp:getChats", () => whatsappService.getChats());
-  electron.ipcMain.handle("whatsapp:getMessages", (_e, chatId) => whatsappService.getMessages(chatId));
-  electron.ipcMain.handle("whatsapp:sendMessage", (_e, chatId, text) => whatsappService.sendMessage(chatId, text));
-  electron.ipcMain.handle("whatsapp:getProfilePicture", (_e, jid) => whatsappService.getProfilePicture(jid));
-  electron.ipcMain.handle("whatsapp:clearCreds", () => whatsappService.clearCreds());
+  handle("whatsapp:getStatus", () => whatsappService.getStatus());
+  handle("whatsapp:getQRCode", () => whatsappService.getQRCode());
+  handle("whatsapp:connect", () => whatsappService.connect());
+  handle("whatsapp:disconnect", () => whatsappService.disconnect());
+  handle("whatsapp:getChats", () => whatsappService.getChats());
+  handle("whatsapp:getMessages", (chatId) => whatsappService.getMessages(chatId));
+  handle("whatsapp:sendMessage", (chatId, text) => whatsappService.sendMessage(chatId, text));
+  handle("whatsapp:getProfilePicture", (jid) => whatsappService.getProfilePicture(jid));
+  handle("whatsapp:clearCreds", () => whatsappService.clearCreds());
   instagramService.on("connected", () => broadcast("instagram:connected"));
   instagramService.on("disconnected", () => broadcast("instagram:disconnected"));
   instagramService.on("message", (msg) => broadcast("instagram:message", msg));
   instagramService.on("threadsUpdated", (threads) => broadcast("instagram:threadsUpdated", threads));
-  electron.ipcMain.handle("instagram:getStatus", () => instagramService.getStatus());
-  electron.ipcMain.handle("instagram:loginWithBrowser", async () => {
-    await instagramService.loginWithBrowser();
-  });
-  electron.ipcMain.handle("instagram:tryRestore", async () => {
-    await instagramService.tryRestore();
-  });
-  electron.ipcMain.handle("instagram:logout", () => instagramService.logout());
-  electron.ipcMain.handle("instagram:getThreads", () => instagramService.getThreads());
-  electron.ipcMain.handle("instagram:getMessages", (_e, threadId) => instagramService.getMessages(threadId));
-  electron.ipcMain.handle("instagram:sendMessage", (_e, threadId, text) => instagramService.sendMessage(threadId, text));
-  electron.ipcMain.handle("app:reload", () => {
+  handle("instagram:getStatus", () => instagramService.getStatus());
+  handle("instagram:loginWithBrowser", () => instagramService.loginWithBrowser());
+  handle("instagram:tryRestore", () => instagramService.tryRestore());
+  handle("instagram:logout", () => instagramService.logout());
+  handle("instagram:getThreads", () => instagramService.getThreads());
+  handle("instagram:getMessages", (threadId) => instagramService.getMessages(threadId));
+  handle("instagram:sendMessage", (threadId, text) => instagramService.sendMessage(threadId, text));
+  handle("app:reload", () => {
     electron.BrowserWindow.getAllWindows().forEach((w) => w.webContents.reloadIgnoringCache());
   });
-  electron.ipcMain.handle("app:clearTokens", async () => {
+  handle("app:clearTokens", async () => {
     try {
       await whatsappService.disconnect();
     } catch (e) {
-      console.log("[IPC] erro disconnect:", e);
+      debug.log("[IPC] erro disconnect:", e);
     }
     try {
       waClearAll();
       instagramService.logout();
-      console.log("[IPC] tokens limpos");
+      debug.log("[IPC] tokens limpos");
     } catch (e) {
-      console.log("[IPC] erro clear:", e);
+      debug.log("[IPC] erro clear:", e);
     }
     electron.BrowserWindow.getAllWindows().forEach((w) => w.webContents.reloadIgnoringCache());
+  });
+  handle("debug:getEnabled", () => debug.enabled);
+  debug.onToggle((enabled2) => {
+    broadcast("debug:toggle", enabled2);
   });
 }
 let mainWindow = null;
@@ -607,6 +675,7 @@ function createWindow() {
       nodeIntegration: false
     }
   });
+  watchDevtools(mainWindow);
   mainWindow.on("ready-to-show", () => {
     mainWindow?.show();
   });

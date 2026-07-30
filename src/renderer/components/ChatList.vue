@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, computed, watch } from 'vue'
+import { formatRelativeTime, getName } from '@shared/utils'
 
 const props = defineProps<{
   chats: any[]
@@ -9,35 +10,36 @@ const props = defineProps<{
 const emit = defineEmits<{ select: [chatId: string] }>()
 
 const avatars = ref<Record<string, string>>({})
+const searchQuery = ref('')
 
 watch(() => props.chats, async (chats) => {
   for (const chat of chats || []) {
     if (chat.id && !avatars.value[chat.id]) {
-      const url = await window.electronAPI.whatsapp.getProfilePicture(chat.id)
-      if (url) avatars.value[chat.id] = url
+      if (chat.avatarUrl) {
+        avatars.value[chat.id] = chat.avatarUrl
+      } else {
+        const url = await window.electronAPI.whatsapp.getProfilePicture(chat.id)
+        if (url) avatars.value[chat.id] = url
+      }
     }
   }
 }, { immediate: true })
 
-function formatTime(timestamp: number | undefined) {
-  if (!timestamp) return ''
-  const d = new Date(typeof timestamp === 'number' ? timestamp * 1000 : timestamp)
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
-
-function getName(chat: any) {
-  return chat.name || chat.subject || chat.id?.split('@')[0]?.replace(/[^0-9]/g, '') || 'Unknown'
-}
+const filteredChats = computed(() => {
+  const q = searchQuery.value.toLowerCase().trim()
+  if (!q) return props.chats
+  return props.chats.filter(c => getName(c).toLowerCase().includes(q))
+})
 </script>
 
 <template>
   <div class="chat-list">
     <div class="search">
-      <input type="text" placeholder="Buscar conversa..." />
+      <input v-model="searchQuery" type="text" placeholder="Buscar conversa..." />
     </div>
     <div class="list">
       <div
-        v-for="chat in chats"
+        v-for="chat in filteredChats"
         :key="chat.id"
         :class="['chat-item', { selected: chat.id === selectedId }]"
         @click="emit('select', chat.id)"
@@ -50,7 +52,7 @@ function getName(chat: any) {
           <div class="name">{{ getName(chat) }}</div>
           <div class="last-msg">{{ chat.lastMessage?.message?.conversation || chat.lastMessage?.text || chat.lastMessage || '...' }}</div>
         </div>
-        <div class="time">{{ formatTime(chat.lastMessage?.messageTimestamp || chat.lastTimestamp) }}</div>
+        <div class="time">{{ formatRelativeTime(chat.lastMessage?.messageTimestamp || chat.lastTimestamp) }}</div>
       </div>
     </div>
   </div>
@@ -61,6 +63,7 @@ function getName(chat: any) {
   width: $chatlist-width;
   border-right: 1px solid $border-color;
   @include flex-column;
+  overflow: hidden;
   background: $bg-chatlist;
 }
 

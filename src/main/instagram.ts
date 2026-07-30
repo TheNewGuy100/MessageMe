@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
 import { BrowserWindow } from 'electron'
 import { storeGet, storeSet, storeDelete } from './database'
+import { debug } from './debug'
 
 const IG_APP_ID = process.env.IG_APP_ID || '936619743392459'
 const BASE = process.env.IG_BASE_URL || 'https://www.instagram.com'
@@ -31,6 +32,7 @@ class InstagramService extends EventEmitter {
 
   private async igFetch(path: string, options: RequestInit = {}) {
     const url = path.startsWith('http') ? path : `${API}${path}`
+    debug.log('[IG] fetch', options.method || 'GET', url)
     const headers: Record<string, string> = {
       'User-Agent': USER_AGENT,
       'Accept': '*/*',
@@ -51,7 +53,12 @@ class InstagramService extends EventEmitter {
     }
 
     const res = await fetch(url, { ...options, headers: { ...headers, ...options.headers as any }, redirect: 'follow' })
-    if (!res.ok) throw new Error(`Instagram API ${res.status}: ${await res.text()}`)
+    debug.log('[IG] response', res.status, res.statusText)
+    if (!res.ok) {
+      const text = await res.text()
+      debug.log('[IG] error body', text)
+      throw new Error(`Instagram API ${res.status}: ${text}`)
+    }
     return res.json()
   }
 
@@ -154,40 +161,26 @@ class InstagramService extends EventEmitter {
     form.append('text', text)
     form.append('thread_ids', `["${threadId}"]`)
     form.append('action', 'send_item')
-    const makeHeaders = (host: string) => ({
+    const headers = {
       'User-Agent': USER_AGENT,
       'Accept': '*/*',
       'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
       'X-IG-App-ID': IG_APP_ID,
       'X-CSRFToken': this.cookies?.csrftoken ?? '',
       'Cookie': this.cookieString(),
-      'X-Requested-With': 'XMLHttpRequest',
       'Origin': BASE,
       'Referer': `${BASE}/direct/inbox/`,
       'Content-Type': 'application/x-www-form-urlencoded',
-      'Host': host,
-    })
-    let res = await fetch(`${API}/direct_v2/threads/broadcast/text/`, {
+    }
+    const res = await fetch(`${API}/direct_v2/threads/broadcast/text/`, {
       method: 'POST',
       body: form,
-      headers: makeHeaders('www.instagram.com'),
-      redirect: 'manual'
+      headers,
+      redirect: 'follow'
     })
-    if (res.status >= 300 && res.status < 400) {
-      const location = res.headers.get('location')
-      console.log('[IG] sendMessage redirect to:', location, 'status:', res.status)
-      if (location) {
-        res = await fetch(location.startsWith('http') ? location : `https://i.instagram.com${location}`, {
-          method: 'POST',
-          body: form,
-          headers: makeHeaders('i.instagram.com'),
-          redirect: 'error'
-        })
-      }
-    }
     if (!res.ok) {
       const body = await res.text()
-      console.log('[IG] sendMessage response:', res.status, body)
+      debug.log('[IG] sendMessage response:', res.status, body)
       throw new Error(`Instagram API ${res.status}: ${body}`)
     }
   }
@@ -214,11 +207,12 @@ class InstagramService extends EventEmitter {
         name: t.thread_title || t.users?.map((u: any) => u.username).join(', ') || 'Unknown',
         lastMessage: t.last_permanent_item?.text || t.last_item?.text || '',
         lastTimestamp: t.last_activity_at || t.last_item?.timestamp,
-        unread: t.has_newer
+        unread: t.has_newer,
+        avatarUrl: t.users?.[0]?.profile_pic_url || ''
       }))
       this.emit('threadsUpdated', this.threads)
     } catch (e) {
-      console.log('[IG] erro loadThreads:', e)
+      debug.log('[IG] erro loadThreads:', e)
     }
   }
 }

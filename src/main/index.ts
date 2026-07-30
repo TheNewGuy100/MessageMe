@@ -1,6 +1,7 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc'
+import { watchDevtools } from './debug'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -19,6 +20,8 @@ function createWindow() {
       nodeIntegration: false
     }
   })
+
+  watchDevtools(mainWindow)
 
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show()

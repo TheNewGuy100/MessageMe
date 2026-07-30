@@ -16,12 +16,14 @@
     "allowSyntheticDefaultImports": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/renderer/*"]
+      "@/*": ["src/renderer/*"],
+      "@shared/*": ["src/shared/*"]
     }
   },
   "include": [
     "src/renderer/**/*.ts",
     "src/renderer/**/*.vue",
-    "src/renderer/**/*.d.ts"
+    "src/renderer/**/*.d.ts",
+    "src/shared/**/*.ts"
   ]
 }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { formatTime, getText, isMine } from '@shared/utils'
 
 const props = defineProps<{
   messages: any[]
@@ -9,25 +10,6 @@ const props = defineProps<{
 
 const emit = defineEmits<{ send: [text: string] }>()
 const inputText = ref('')
-
-function formatTime(ts: number | undefined) {
-  if (!ts) return ''
-  const ms = typeof ts === 'number' && ts > 1e11 ? ts : ts * 1000
-  const d = new Date(ms)
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
-
-function getText(msg: any) {
-  return msg.message?.conversation
-    || msg.message?.extendedTextMessage?.text
-    || msg.message?.imageMessage?.caption
-    || msg.text
-    || ''
-}
-
-function isMine(msg: any) {
-  return msg.key?.fromMe || msg.isMine
-}
 
 function handleSend() {
   const text = inputText.value.trim()

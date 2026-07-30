@@ -31,5 +31,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   removeListener: (channel: string) => {
     ipcRenderer.removeAllListeners(channel)
+  },
+  debug: {
+    getEnabled: () => ipcRenderer.invoke('debug:getEnabled'),
+    onToggle: (callback: (enabled: boolean) => void) => {
+      ipcRenderer.on('debug:toggle', (_e, enabled) => callback(enabled))
+    }
   }
 })
