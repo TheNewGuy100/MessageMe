@@ -1,4 +1,4 @@
-import { waGetCreds, waSetCreds, waGetKey, waSetKey } from './database'
+import { waGetCreds, waSetCreds, waGetKey, waSetKey, waDeleteKey } from './database'
 
 let initAuthCreds: any
 let BufferJSON: any
@@ -22,8 +22,16 @@ function makeKeyStore() {
   }
 
   const set = async (data: Record<string, any>) => {
-    for (const id in data) {
-      waSetKey(id, JSON.stringify(data[id], BufferJSON.replacer))
+    for (const type in data) {
+      for (const id in data[type]) {
+        const key = `${type}:${id}`
+        const value = data[type][id]
+        if (value === null) {
+          waDeleteKey(key)
+        } else {
+          waSetKey(key, JSON.stringify(value, BufferJSON.replacer))
+        }
+      }
     }
   }
 

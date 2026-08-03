@@ -17,13 +17,23 @@ onMounted(async () => {
     emit('connected')
   })
 
+  window.electronAPI.onEvent('whatsapp:connecting', () => {
+    qrDataUrl.value = null
+    loading.value = true
+    error.value = ''
+  })
+
   window.electronAPI.onEvent('whatsapp:error', (msg: string) => {
     error.value = msg
     loading.value = false
   })
 
   const status = await window.electronAPI.whatsapp.getStatus()
-  if (status === 'disconnected') {
+  const qr = await window.electronAPI.whatsapp.getQRCode()
+  if (qr) {
+    qrDataUrl.value = qr
+    loading.value = false
+  } else if (status === 'disconnected') {
     await window.electronAPI.whatsapp.connect()
   } else if (status === 'connected') {
     emit('connected')
@@ -33,6 +43,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.electronAPI.removeListener('whatsapp:qr')
   window.electronAPI.removeListener('whatsapp:connected')
+  window.electronAPI.removeListener('whatsapp:connecting')
   window.electronAPI.removeListener('whatsapp:error')
 })
 

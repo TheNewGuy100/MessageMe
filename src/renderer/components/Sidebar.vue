@@ -20,6 +20,19 @@ function statusColor(s: string) {
   return '#ff5252'
 }
 
+async function clearDatabase() {
+  const confirmed = window.confirm(
+    'Isso apagará chats, mensagens, cache e envios pendentes do WhatsApp. Os tokens e a sessão não serão apagados. Continuar?'
+  )
+  if (!confirmed) return
+
+  try {
+    await api.whatsapp.clearDatabase()
+  } catch (error: any) {
+    window.alert(error?.message || 'Não foi possível limpar o banco de dados.')
+  }
+}
+
 onMounted(() => {
   window.electronAPI.onEvent('whatsapp:connecting', () => { waStatus.value = 'connecting' })
   window.electronAPI.onEvent('whatsapp:connected', () => { waStatus.value = 'connected' })
@@ -56,6 +69,9 @@ onUnmounted(() => {
       </button>
     </nav>
     <div class="bottom">
+      <button class="database-btn" @click="clearDatabase">
+        Limpar banco
+      </button>
       <button class="clear-btn" @click="api.app.clearTokens()">
         Limpar tokens
       </button>
@@ -144,6 +160,23 @@ button.active {
   padding: 8px;
   border-radius: $radius-sm;
   margin-bottom: 6px;
+}
+
+.database-btn {
+  width: 100%;
+  justify-content: center;
+  background: $bg-hover;
+  color: $text-primary;
+  font-weight: 700;
+  font-size: 13px;
+  padding: 8px;
+  border-radius: $radius-sm;
+  margin-bottom: 6px;
+}
+
+.database-btn:hover {
+  background: $border-color;
+  color: #fff;
 }
 
 .clear-btn:hover {

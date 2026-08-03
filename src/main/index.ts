@@ -1,7 +1,11 @@
 import { app, BrowserWindow, shell } from 'electron'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc'
-import { watchDevtools } from './debug'
+import { debug, watchDevtools } from './debug'
+import { handleRenderError } from '../shared/handlers/render-error'
+import { handleNetworkError } from '../shared/handlers/network-error'
+import { whatsappService } from './whatsapp'
+import { instagramService } from './instagram'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -23,6 +27,22 @@ function createWindow() {
 
   watchDevtools(mainWindow)
 
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    handleRenderError({ kind: 'load-failed', errorCode, errorDescription, url: validatedURL, isMainFrame })
+  })
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    handleRenderError({ kind: 'process-gone', reason: details.reason, exitCode: details.exitCode })
+  })
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    const isInternalLog = /\[(?:DEBUG|NETWORK|RENDER|IPC)\]/.test(message)
+    if (level < 3 || isInternalLog) return
+    if (/remote method|Instagram API|Failed to fetch|network/i.test(message)) {
+      handleNetworkError({ kind: 'renderer-network-error', message, line, source: sourceId })
+      return
+    }
+    handleRenderError({ kind: 'console-error', message, line, source: sourceId })
+  })
+
   mainWindow.on('ready-to-show', () => {
     mainWindow?.show()
   })
@@ -41,6 +61,8 @@ function createWindow() {
 
 app.whenReady().then(() => {
   registerIpcHandlers()
+  whatsappService.connect().catch(error => console.error('[WA] startup error:', error))
+  instagramService.tryRestore().catch(error => console.error('[IG] startup restore error:', error))
   createWindow()
 
   app.on('activate', () => {

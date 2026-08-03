@@ -7,6 +7,8 @@ const status = ref<'disconnected' | 'connected'>('disconnected')
 const loading = ref(false)
 const loadingThreads = ref(false)
 const loadingMessages = ref(false)
+const loadingMoreThreads = ref(false)
+const loadingMoreMessages = ref(false)
 const error = ref('')
 const threads = ref<any[]>([])
 const messages = ref<any[]>([])
@@ -15,6 +17,14 @@ const sendError = ref('')
 const selectedThread = ref<string | null>(null)
 const selectedThreadGraphqlId = ref<string | null>(null)
 const selectedThreadName = ref('')
+const threadsCursor = ref<string | null>(null)
+const hasMoreThreads = ref(false)
+const activeFolder = ref<'main' | 'pending' | 'hidden'>('main')
+const messagesCursor = ref<string | null>(null)
+const hasMoreMessages = ref(false)
+const searchQuery = ref('')
+const threadsBeforeSearch = ref<any[] | null>(null)
+let searchRequestId = 0
 
 const prefix = 'instagram'
 const api = window.electronAPI.instagram
@@ -39,15 +49,75 @@ async function handleLogout() {
   messages.value = []
   selectedThread.value = null
   selectedThreadGraphqlId.value = null
+  threadsCursor.value = null
+  messagesCursor.value = null
+  searchQuery.value = ''
+  threadsBeforeSearch.value = null
 }
 
-async function loadThreads() {
+async function loadThreads(folder = activeFolder.value) {
   loadingThreads.value = true
   try {
-    threads.value = await api.getThreads()
+    try {
+      const cached = await api.getCachedThreads(folder)
+      if (folder === activeFolder.value && cached.length) {
+        threads.value = cached
+        loadingThreads.value = false
+      }
+    } catch {
+      // A missing cache must not prevent the live request.
+    }
+    const page = await api.getThreadsPage(folder)
+    if (folder === activeFolder.value) threads.value = page.threads
+    threadsCursor.value = page.nextCursor
+    hasMoreThreads.value = page.hasMore
+  } catch (e: any) {
+    error.value = e?.message || 'Não foi possível carregar as conversas do Instagram'
   } finally {
     loadingThreads.value = false
   }
+}
+
+async function switchFolder(folder: 'main' | 'pending' | 'hidden') {
+  if (folder === activeFolder.value) return
+  activeFolder.value = folder
+  selectedThread.value = null
+  selectedThreadGraphqlId.value = null
+  messages.value = []
+  messagesCursor.value = null
+  hasMoreMessages.value = false
+  await loadThreads(folder)
+}
+
+async function loadMoreThreads() {
+  if (!threadsCursor.value || loadingMoreThreads.value) return
+  loadingMoreThreads.value = true
+  try {
+    const page = await api.getThreadsPage(activeFolder.value, threadsCursor.value)
+    const existing = new Set(threads.value.map(thread => thread.id))
+    threads.value = [...threads.value, ...page.threads.filter(thread => !existing.has(thread.id))]
+    threadsCursor.value = page.nextCursor
+    hasMoreThreads.value = page.hasMore
+  } finally {
+    loadingMoreThreads.value = false
+  }
+}
+
+async function searchThreads(query: string) {
+  searchQuery.value = query
+  const normalizedQuery = query.trim()
+  if (!normalizedQuery) {
+    threads.value = threadsBeforeSearch.value || threads.value
+    threadsBeforeSearch.value = null
+    return
+  }
+  if (!threadsBeforeSearch.value) threadsBeforeSearch.value = [...threads.value]
+  const requestId = ++searchRequestId
+  const results = await api.searchThreads(normalizedQuery)
+  if (requestId !== searchRequestId || searchQuery.value.trim() !== normalizedQuery) return
+  threads.value = results
+  threadsCursor.value = null
+  hasMoreThreads.value = false
 }
 
 async function selectThread(threadId: string) {
@@ -57,9 +127,26 @@ async function selectThread(threadId: string) {
   selectedThreadName.value = t?.name || threadId
   loadingMessages.value = true
   try {
-    messages.value = await api.getMessages(threadId)
+    const page = await api.getMessagesPage(threadId)
+    messages.value = page.messages
+    messagesCursor.value = page.nextCursor
+    hasMoreMessages.value = page.hasMore
   } finally {
     loadingMessages.value = false
+  }
+}
+
+async function loadOlderMessages() {
+  if (!selectedThread.value || !messagesCursor.value || loadingMoreMessages.value) return
+  loadingMoreMessages.value = true
+  try {
+    const page = await api.getMessagesPage(selectedThread.value, messagesCursor.value)
+    const existing = new Set(messages.value.map(message => message.id))
+    messages.value = [...page.messages.filter(message => !existing.has(message.id)), ...messages.value]
+    messagesCursor.value = page.nextCursor
+    hasMoreMessages.value = page.hasMore
+  } finally {
+    loadingMoreMessages.value = false
   }
 }
 
@@ -79,7 +166,13 @@ async function sendMessage(text: string) {
 
 function onThreadsUpdated(updated: any[]) {
   loadingThreads.value = false
-  threads.value = updated
+  if (searchQuery.value.trim()) return
+  if (activeFolder.value !== 'main') return
+  const merged = new Map(threads.value.map(thread => [thread.id, thread]))
+  for (const thread of updated.filter(thread => !thread.folder || thread.folder === 'main')) {
+    merged.set(thread.id, { ...merged.get(thread.id), ...thread })
+  }
+  threads.value = [...merged.values()].sort((a, b) => Number(b.lastTimestamp || 0) - Number(a.lastTimestamp || 0))
 }
 function onMessage(msg: any) {
   if (msg.threadId === selectedThread.value) {
@@ -97,6 +190,10 @@ onMounted(async () => {
     messages.value = []
     selectedThread.value = null
     selectedThreadGraphqlId.value = null
+    threadsCursor.value = null
+    messagesCursor.value = null
+    searchQuery.value = ''
+    threadsBeforeSearch.value = null
   })
   window.electronAPI.onEvent(`${prefix}:message`, onMessage)
   window.electronAPI.onEvent(`${prefix}:threadsUpdated`, onThreadsUpdated)
@@ -128,16 +225,25 @@ onUnmounted(() => {
       </div>
     </div>
     <div v-else class="content">
-      <div class="sidebar-area">
-        <div v-if="loadingThreads" class="list-loading">
+        <div class="sidebar-area">
+          <div class="folder-tabs">
+            <button :class="{ active: activeFolder === 'main' }" @click="switchFolder('main')">Principal</button>
+            <button :class="{ active: activeFolder === 'pending' }" @click="switchFolder('pending')">Solicitações</button>
+            <button :class="{ active: activeFolder === 'hidden' }" @click="switchFolder('hidden')">Ocultas</button>
+          </div>
+          <div v-if="loadingThreads" class="list-loading">
           <span class="list-spinner"></span>
         </div>
         <ChatList
           v-else
           :chats="threads"
           platform="instagram"
+          :has-more="hasMoreThreads"
+          :loading-more="loadingMoreThreads"
           :selected-id="selectedThread ?? undefined"
           @select="selectThread"
+          @load-more="loadMoreThreads"
+          @search="searchThreads"
         />
       </div>
       <div v-if="selectedThread" class="chat-area">
@@ -147,7 +253,11 @@ onUnmounted(() => {
           :chat-name="selectedThreadName"
           :loading="loadingMessages"
           :sending="sending"
+          :has-more="hasMoreMessages"
+          :loading-more="loadingMoreMessages"
+          :scroll-key="`instagram:${selectedThread}`"
           @send="sendMessage"
+          @load-more="loadOlderMessages"
         />
       </div>
       <div v-else class="empty-state">
@@ -160,6 +270,34 @@ onUnmounted(() => {
 <style scoped lang="scss">
 .platform-view {
   @include flex-fill;
+}
+
+.folder-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid $border-color;
+  background: $bg-secondary;
+}
+
+.folder-tabs button {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 5px;
+  border: 1px solid transparent;
+  border-radius: $radius-sm;
+  background: transparent;
+  color: $text-secondary;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.folder-tabs button:hover,
+.folder-tabs button.active {
+  border-color: $accent;
+  background: $bg-accent-18;
+  color: $accent;
 }
 
 .login-area {
@@ -244,8 +382,22 @@ onUnmounted(() => {
   @include flex-center;
 }
 
+.list-arc {
+  width: 82%;
+  height: 28px;
+  border-bottom: 4px solid rgba($instagram, 0.58);
+  border-radius: 0 0 50% 50% / 0 0 100% 100%;
+  box-shadow: 0 4px 10px rgba($instagram, 0.42), 0 0 18px rgba($instagram, 0.18);
+  animation: list-glow 1.1s ease-in-out infinite;
+}
+
 .list-spinner {
   @include spinner;
+}
+
+@keyframes list-glow {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.72; }
 }
 
 .send-error {

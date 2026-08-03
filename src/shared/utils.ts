@@ -1,6 +1,8 @@
 function toMs(ts: number | string | undefined): number | null {
   if (ts == null) return null
-  const num = typeof ts === 'number' ? ts : Number(ts)
+  const num = typeof ts === 'object' && ts !== null && 'low' in ts
+    ? Number((ts as any).low) + Number((ts as any).high || 0) * 4294967296
+    : typeof ts === 'number' ? ts : Number(ts)
   if (!num) return null
   return num > 1e11 ? num : num * 1000
 }
@@ -35,9 +37,31 @@ export function getName(chat: any): string {
 }
 
 export function getText(msg: any): string {
-  return msg.message?.conversation
-    || msg.message?.extendedTextMessage?.text
-    || msg.message?.imageMessage?.caption
+  if (!msg) return ''
+  if (typeof msg === 'string') return msg
+
+  const content = msg.message?.ephemeralMessage?.message
+    || msg.message?.viewOnceMessage?.message
+    || msg.message?.viewOnceMessageV2?.message
+    || msg.message
+    || msg
+
+  return content.conversation
+    || content.extendedTextMessage?.text
+    || content.imageMessage?.caption
+    || content.videoMessage?.caption
+    || content.documentMessage?.caption
+    || content.buttonsResponseMessage?.selectedDisplayText
+    || content.listResponseMessage?.title
+    || content.templateButtonReplyMessage?.selectedDisplayText
+    || content.contactMessage?.displayName
+    || content.contactsArrayMessage?.contacts?.map((contact: any) => contact.displayName).filter(Boolean).join(', ')
+    || content.locationMessage?.name
+    || content.locationMessage?.address
+    || content.liveLocationMessage?.caption
+    || content.pollCreationMessage?.name
+    || content.productMessage?.product?.title
+    || content.reactionMessage?.text
     || msg.text
     || ''
 }

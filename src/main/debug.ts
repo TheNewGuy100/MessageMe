@@ -1,6 +1,6 @@
 import { BrowserWindow } from 'electron'
 
-let enabled = false
+let enabled = true
 
 type ToggleListener = (enabled: boolean) => void
 const toggleListeners: ToggleListener[] = []
@@ -52,11 +52,30 @@ export const debug = {
 
   error(...args: any[]) { debug.send('error', ...args) },
 
+  networkError(...args: any[]) {
+    if (!enabled) return
+    const tag = `[${timestamp()}] [NETWORK]`
+    console.error(tag, ...args)
+    toWindows('debug:network-error', tag, ...args)
+  },
+
+  renderError(...args: any[]) {
+    if (!enabled) return
+    const tag = `[${timestamp()}] [RENDER]`
+    console.error(tag, ...args)
+    toWindows('debug:render-error', tag, ...args)
+  },
+
+  browserLog(...args: any[]) {
+    if (!enabled) return
+    toWindows('debug:log', `[${timestamp()}]`, ...args)
+  },
+
   ipc(channel: string, direction: 'send' | 'result' | 'error', data?: any) {
     if (!enabled) return
     const prefix = direction === 'send' ? '>>' : direction === 'result' ? '<<' : '!!'
     const tag = `[${timestamp()}] [IPC] ${prefix} ${channel}`
-    console.log(tag, data !== undefined ? data : '')
+    // IPC diagnostics stay in the renderer DevTools to keep the main console usable.
     toWindows('debug:ipc', { channel, direction, data, tag })
   },
 

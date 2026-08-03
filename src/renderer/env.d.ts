@@ -11,13 +11,17 @@ interface Window {
     whatsapp: {
       getStatus: () => Promise<string>
       getQRCode: () => Promise<string | null>
+      getHistorySyncing: () => Promise<boolean>
       connect: () => Promise<void>
       disconnect: () => Promise<void>
       getChats: () => Promise<any[]>
       getMessages: (chatId: string) => Promise<any[]>
+      getOlderMessages: (chatId: string, beforeId: string) => Promise<{ messages: any[]; hasMore: boolean }>
+      getMedia: (chatId: string, messageId: string) => Promise<string | null>
       sendMessage: (chatId: string, text: string) => Promise<void>
       getProfilePicture: (jid: string) => Promise<string | null>
       clearCreds: () => Promise<void>
+      clearDatabase: () => Promise<void>
     }
     instagram: {
       getStatus: () => Promise<string>
@@ -25,7 +29,11 @@ interface Window {
       tryRestore: () => Promise<void>
       logout: () => Promise<void>
       getThreads: () => Promise<any[]>
+      getCachedThreads: (folder?: string) => Promise<any[]>
       getMessages: (threadId: string) => Promise<any[]>
+      getMessagesPage: (threadId: string, cursor?: string) => Promise<{ messages: any[]; nextCursor: string | null; hasMore: boolean }>
+      getThreadsPage: (folder?: string, cursor?: string) => Promise<{ threads: any[]; nextCursor: string | null; hasMore: boolean }>
+      searchThreads: (query: string) => Promise<any[]>
       sendMessage: (threadId: string, text: string) => Promise<void>
     }
     app: {
