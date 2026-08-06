@@ -30,7 +30,7 @@ jobs:
           sudo gem install --no-document fpm
 
       - name: Build Linux packages
-        run: npm run dist:linux
+        run: npm run dist:linux -- --publish never
 
       - name: Upload Linux packages
         uses: actions/upload-artifact@v4

@@ -11,11 +11,11 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "dist": "npm run build && electron-builder --win nsis",
-    "dist:linux": "npm run build && electron-builder --linux AppImage deb rpm",
-    "dist:linux:deb": "npm run build && electron-builder --linux deb",
-    "dist:linux:rpm": "npm run build && electron-builder --linux rpm",
-    "dist:linux:appimage": "npm run build && electron-builder --linux AppImage",
+    "dist": "npm run build && electron-builder --win nsis --publish never",
+    "dist:linux": "npm run build && electron-builder --linux AppImage deb rpm --publish never",
+    "dist:linux:deb": "npm run build && electron-builder --linux deb --publish never",
+    "dist:linux:rpm": "npm run build && electron-builder --linux rpm --publish never",
+    "dist:linux:appimage": "npm run build && electron-builder --linux AppImage --publish never",
     "preview": "electron-vite preview"
   },
   "dependencies": {
