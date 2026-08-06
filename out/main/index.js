@@ -1,293 +1,9 @@
 "use strict";
-var __create = Object.create;
-var __defProp = Object.defineProperty;
-var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
-var __getOwnPropNames = Object.getOwnPropertyNames;
-var __getProtoOf = Object.getPrototypeOf;
-var __hasOwnProp = Object.prototype.hasOwnProperty;
-var __copyProps = (to, from, except, desc) => {
-  if (from && typeof from === "object" || typeof from === "function") {
-    for (let key of __getOwnPropNames(from))
-      if (!__hasOwnProp.call(to, key) && key !== except)
-        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
-  }
-  return to;
-};
-var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
-  // If the importer is in node compatibility mode or this is not an ESM
-  // file that has been converted to a CommonJS file using a Babel-
-  // compatible transform (i.e. "__esModule" has not been set), then set
-  // "default" to the CommonJS "module.exports" for node compatibility.
-  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
-  mod
-));
 const electron = require("electron");
 const path = require("path");
-const events = require("events");
-const QR = require("qrcode");
-const Database = require("better-sqlite3");
+const zlib = require("zlib");
 const fs = require("fs");
-let db;
-function getDb() {
-  if (!db) {
-    const dir = path.join(electron.app.getPath("userData"), "data");
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    db = new Database(path.join(dir, "message-manager.db"));
-    db.pragma("journal_mode = WAL");
-    initSchema();
-  }
-  return db;
-}
-function initSchema() {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS store (
-      namespace TEXT NOT NULL,
-      key TEXT NOT NULL,
-      value TEXT,
-      PRIMARY KEY (namespace, key)
-    );
-
-    CREATE TABLE IF NOT EXISTS wa_creds (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      data TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS wa_keys (
-      id TEXT PRIMARY KEY,
-      data TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS wa_chats (
-      id TEXT PRIMARY KEY,
-      data TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS wa_messages (
-      chat_id TEXT NOT NULL,
-      message_id TEXT NOT NULL,
-      message_timestamp INTEGER NOT NULL DEFAULT 0,
-      data TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (chat_id, message_id)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_wa_messages_chat_time
-      ON wa_messages (chat_id, message_timestamp);
-
-    CREATE TABLE IF NOT EXISTS wa_outbox (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      chat_id TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      data TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      attempts INTEGER NOT NULL DEFAULT 0,
-      next_attempt_at INTEGER NOT NULL DEFAULT 0,
-      last_error TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_wa_outbox_pending
-      ON wa_outbox (status, next_attempt_at);
-
-    CREATE TABLE IF NOT EXISTS instagram_threads (
-      folder TEXT NOT NULL,
-      id TEXT NOT NULL,
-      data TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (folder, id)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_instagram_threads_folder
-      ON instagram_threads (folder, updated_at);
-  `);
-}
-function storeGet(namespace, key) {
-  const row = getDb().prepare("SELECT value FROM store WHERE namespace = ? AND key = ?").get(namespace, key);
-  return row?.value;
-}
-function storeSet(namespace, key, value) {
-  getDb().prepare("INSERT OR REPLACE INTO store (namespace, key, value) VALUES (?, ?, ?)").run(namespace, key, value);
-}
-function storeDelete(namespace, key) {
-  getDb().prepare("DELETE FROM store WHERE namespace = ? AND key = ?").run(namespace, key);
-}
-function waGetCreds() {
-  const row = getDb().prepare("SELECT data FROM wa_creds WHERE id = 1").get();
-  return row?.data;
-}
-function waSetCreds(data) {
-  getDb().prepare("INSERT OR REPLACE INTO wa_creds (id, data) VALUES (1, ?)").run(data);
-}
-function waGetKey(id) {
-  const row = getDb().prepare("SELECT data FROM wa_keys WHERE id = ?").get(id);
-  return row?.data;
-}
-function waSetKey(id, data) {
-  getDb().prepare("INSERT OR REPLACE INTO wa_keys (id, data) VALUES (?, ?)").run(id, data);
-}
-function waDeleteKey(id) {
-  getDb().prepare("DELETE FROM wa_keys WHERE id = ?").run(id);
-}
-function waClearAll() {
-  const d = getDb();
-  d.prepare("DELETE FROM wa_creds").run();
-  d.prepare("DELETE FROM wa_keys").run();
-  d.prepare("DELETE FROM store WHERE namespace = ?").run("instagram");
-  d.prepare("DELETE FROM store WHERE namespace = ?").run("whatsapp");
-  d.prepare("DELETE FROM wa_chats").run();
-  d.prepare("DELETE FROM wa_messages").run();
-  d.prepare("DELETE FROM wa_outbox").run();
-  d.prepare("DELETE FROM instagram_threads").run();
-}
-function waClearData() {
-  const d = getDb();
-  d.prepare("DELETE FROM store WHERE namespace = ?").run("whatsapp");
-  d.prepare("DELETE FROM wa_chats").run();
-  d.prepare("DELETE FROM wa_messages").run();
-  d.prepare("DELETE FROM wa_outbox").run();
-}
-function instagramUpsertThreads(folder, threads) {
-  const statement = getDb().prepare(`
-    INSERT INTO instagram_threads (folder, id, data, updated_at)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(folder, id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
-  `);
-  const transaction = getDb().transaction((items) => {
-    const now = Date.now();
-    for (const thread of items || []) {
-      if (thread?.id) statement.run(folder, String(thread.id), JSON.stringify(thread), now);
-    }
-  });
-  transaction(threads);
-}
-function instagramReplaceThreads(folder, threads) {
-  const db2 = getDb();
-  const replace = db2.transaction((items) => {
-    db2.prepare("DELETE FROM instagram_threads WHERE folder = ?").run(folder);
-    const now = Date.now();
-    const insert = db2.prepare(`
-      INSERT INTO instagram_threads (folder, id, data, updated_at)
-      VALUES (?, ?, ?, ?)
-    `);
-    for (const thread of items || []) {
-      if (thread?.id) insert.run(folder, String(thread.id), JSON.stringify(thread), now);
-    }
-  });
-  replace(threads);
-}
-function instagramListThreads(folder) {
-  return getDb().prepare(`
-    SELECT id, data FROM instagram_threads
-    WHERE folder = ? ORDER BY updated_at DESC
-  `).all(folder);
-}
-function instagramClearThreads(folder) {
-  getDb().prepare("DELETE FROM instagram_threads").run();
-}
-function waUpsertChat(id, data) {
-  const now = Date.now();
-  getDb().prepare(`
-    INSERT INTO wa_chats (id, data, updated_at) VALUES (?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
-  `).run(id, data, now);
-}
-function waListChats() {
-  return getDb().prepare("SELECT id, data FROM wa_chats ORDER BY updated_at ASC").all();
-}
-function waUpsertMessage(chatId, messageId, timestamp2, data) {
-  const now = Date.now();
-  getDb().prepare(`
-    INSERT INTO wa_messages (chat_id, message_id, message_timestamp, data, updated_at)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(chat_id, message_id) DO UPDATE SET
-      message_timestamp = excluded.message_timestamp,
-      data = excluded.data,
-      updated_at = excluded.updated_at
-  `).run(chatId, messageId, timestamp2, data, now);
-}
-function waListMessages(chatId) {
-  return getDb().prepare("SELECT chat_id, message_id, data FROM wa_messages").all();
-}
-function waEnqueueOutbox(chatId, kind, data) {
-  const now = Date.now();
-  const result = getDb().prepare(`
-    INSERT INTO wa_outbox (chat_id, kind, data, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(chatId, kind, data, now, now);
-  return Number(result.lastInsertRowid);
-}
-function waListPendingOutbox() {
-  return getDb().prepare(`
-    SELECT * FROM wa_outbox
-    WHERE status = 'pending' AND next_attempt_at <= ?
-    ORDER BY id ASC
-  `).all(Date.now());
-}
-function waRecoverOutbox() {
-  getDb().prepare(`
-    UPDATE wa_outbox
-    SET status = 'pending', next_attempt_at = 0, updated_at = ?
-    WHERE status = 'sending'
-  `).run(Date.now());
-}
-function waUpdateOutbox(id, status, attempts, error, nextAttemptAt = 0) {
-  getDb().prepare(`
-    UPDATE wa_outbox
-    SET status = ?, attempts = ?, last_error = ?, next_attempt_at = ?, updated_at = ?
-    WHERE id = ?
-  `).run(status, attempts, error || null, nextAttemptAt, Date.now(), id);
-}
-let initAuthCreds;
-let BufferJSON$1;
-async function loadInitCreds() {
-  if (!initAuthCreds) {
-    const m = await import("@whiskeysockets/baileys");
-    initAuthCreds = m.initAuthCreds;
-    BufferJSON$1 = m.BufferJSON;
-  }
-}
-function makeKeyStore() {
-  const get = async (type, ids) => {
-    const data = {};
-    for (const id of ids) {
-      const val = waGetKey(`${type}:${id}`);
-      if (val) data[id] = JSON.parse(val, BufferJSON$1.reviver);
-    }
-    return data;
-  };
-  const set = async (data) => {
-    for (const type in data) {
-      for (const id in data[type]) {
-        const key = `${type}:${id}`;
-        const value = data[type][id];
-        if (value === null) {
-          waDeleteKey(key);
-        } else {
-          waSetKey(key, JSON.stringify(value, BufferJSON$1.replacer));
-        }
-      }
-    }
-  };
-  return { get, set };
-}
-async function useSqliteAuthState() {
-  await loadInitCreds();
-  let creds;
-  const credsRaw = waGetCreds();
-  if (credsRaw) {
-    creds = JSON.parse(credsRaw, BufferJSON$1.reviver);
-  } else {
-    creds = initAuthCreds();
-    waSetCreds(JSON.stringify(creds, BufferJSON$1.replacer));
-  }
-  const keys = makeKeyStore();
-  const saveCreds = () => {
-    if (creds) waSetCreds(JSON.stringify(creds, BufferJSON$1.replacer));
-  };
-  return { state: { creds, keys }, saveCreds };
-}
+const Database = require("better-sqlite3");
 let enabled = true;
 const toggleListeners = [];
 function timestamp() {
@@ -365,652 +81,6 @@ function watchDevtools(window) {
   window.webContents.on("devtools-closed", () => debug.disable());
   if (window.webContents.isDevToolsOpened()) debug.enable();
 }
-let makeWASocket, downloadMediaMessage, BufferJSON;
-async function loadBaileys() {
-  const m = await import("@whiskeysockets/baileys");
-  makeWASocket = m.default;
-  downloadMediaMessage = m.downloadMediaMessage;
-  BufferJSON = m.BufferJSON;
-}
-function makeLogger(label) {
-  const noop = () => {
-  };
-  const log = (fn) => (msg, ...args) => {
-    if (msg && typeof msg === "object" && "histNotification" in msg) {
-      debug.browserLog(`[WA:${label}] ${fn}:`, msg, ...args);
-      return;
-    }
-    if (typeof msg === "string") console.log(`[WA:${label}] ${fn}:`, msg, ...args);
-    else console.log(`[WA:${label}] ${fn}:`, msg);
-  };
-  const child = () => makeLogger(label + ".c");
-  return { info: log("info"), warn: log("warn"), error: log("error"), debug: noop, trace: noop, fatal: log("fatal"), child };
-}
-function timestampValue(value) {
-  if (value && typeof value === "object" && typeof value.low === "number") {
-    return value.low + (value.high || 0) * 4294967296;
-  }
-  const numeric = Number(value);
-  return Number.isFinite(numeric) ? numeric : 0;
-}
-function chatTimestamp(chat) {
-  return Math.max(
-    timestampValue(chat?.conversationTimestamp),
-    timestampValue(chat?.lastMessage?.messageTimestamp),
-    timestampValue(chat?.lastMessageTimestamp),
-    timestampValue(chat?.lastTimestamp),
-    timestampValue(chat?.timestamp)
-  );
-}
-function messageTimestamp(message) {
-  const value = message?.messageTimestamp ?? message?.timestamp ?? message?.message?.messageTimestamp;
-  return timestampValue(value);
-}
-function sortMessages(messages) {
-  return messages.map((message, index) => ({ message, index })).sort((a, b) => {
-    const timestampDifference = messageTimestamp(a.message) - messageTimestamp(b.message);
-    if (timestampDifference) return timestampDifference;
-    const idDifference = String(a.message.key?.id || a.message.id || "").localeCompare(String(b.message.key?.id || b.message.id || ""));
-    return idDifference || a.index - b.index;
-  }).map(({ message }) => message);
-}
-function hasMessagePayload(message) {
-  if (!message?.message || typeof message.message !== "object") return false;
-  return Object.keys(message.message).some((key) => key !== "protocolMessage" && key !== "messageContextInfo");
-}
-function latestMessage(messages) {
-  return sortMessages(messages.filter(hasMessagePayload)).at(-1);
-}
-function disconnectDetails(error) {
-  if (!error) return null;
-  const output = error.output || {};
-  const data = output.payload?.data ?? output.data ?? error.data;
-  return {
-    name: error.name,
-    message: error.message,
-    statusCode: output.statusCode ?? error.statusCode,
-    data: typeof data === "string" || typeof data === "number" ? data : void 0,
-    stack: error.stack
-  };
-}
-function contactKeys(value) {
-  if (!value) return [];
-  const key = String(value);
-  const bare = key.split("@")[0];
-  return [...new Set([key, bare].filter(Boolean))];
-}
-function isPlaceholderName(name, chatId) {
-  if (!name) return true;
-  const normalizedName = String(name).replace(/[^0-9]/g, "");
-  const normalizedId = String(chatId || "").split("@")[0].replace(/[^0-9]/g, "");
-  return Boolean(normalizedName && normalizedId && normalizedName === normalizedId);
-}
-class WhatsAppService extends events.EventEmitter {
-  sock = null;
-  qrBase64 = null;
-  status = "disconnected";
-  chats = [];
-  contactNames = /* @__PURE__ */ new Map();
-  messagesByChat = /* @__PURE__ */ new Map();
-  initPromise = null;
-  saveCreds = null;
-  reconnectTimer = null;
-  connecting = false;
-  qrTimeout = null;
-  historySyncing = false;
-  cacheLoaded = false;
-  persistTimer = null;
-  historyFetches = 0;
-  historyCompleteTimer = null;
-  historyStatusComplete = false;
-  outboxRunning = false;
-  getStatus() {
-    return this.status;
-  }
-  getQRCode() {
-    return this.qrBase64;
-  }
-  getHistorySyncing() {
-    return this.historySyncing;
-  }
-  getChats() {
-    return this.sortedChats();
-  }
-  getMessages(chatId) {
-    return sortMessages([...this.messagesByChat.get(chatId) || []].filter(hasMessagePayload)).slice(-50);
-  }
-  async getOlderMessages(chatId, beforeId) {
-    const getSorted = () => sortMessages([...this.messagesByChat.get(chatId) || []].filter(hasMessagePayload));
-    let messages = getSorted();
-    let index = messages.findIndex((message) => message.key?.id === beforeId);
-    if (index <= 0 && this.sock && messages[0]?.key) {
-      this.historyFetches++;
-      try {
-        await this.sock.fetchMessageHistory(50, messages[0].key, messageTimestamp(messages[0]));
-        await new Promise((resolve) => setTimeout(resolve, 1200));
-        messages = getSorted();
-        index = messages.findIndex((message) => message.key?.id === beforeId);
-      } catch (error) {
-        console.warn("[WA] não foi possível buscar mensagens antigas:", error?.message || error);
-      } finally {
-        this.historyFetches--;
-      }
-    }
-    if (index <= 0) return { messages: [], hasMore: false };
-    const older = messages.slice(Math.max(0, index - 50), index);
-    return { messages: older, hasMore: index - older.length > 0 };
-  }
-  async getMedia(chatId, messageId) {
-    if (!downloadMediaMessage) await this.ensureBaileys();
-    const message = this.messagesByChat.get(chatId)?.find((msg) => msg.key?.id === messageId);
-    const content = message?.message?.ephemeralMessage?.message || message?.message?.viewOnceMessage?.message || message?.message;
-    if (!content) return null;
-    const media = content.imageMessage ? { value: content.imageMessage, type: "image", mime: "image/jpeg" } : content.videoMessage ? { value: content.videoMessage, type: "video", mime: "video/mp4" } : content.audioMessage ? { value: content.audioMessage, type: "audio", mime: "audio/ogg" } : content.stickerMessage ? { value: content.stickerMessage, type: "sticker", mime: "image/webp" } : content.documentMessage ? { value: content.documentMessage, type: "document", mime: "application/octet-stream" } : null;
-    if (!media) return null;
-    try {
-      const buffer = await downloadMediaMessage(message, "buffer", {}, {
-        logger: makeLogger("media"),
-        reuploadRequest: async (staleMessage) => {
-          const updatedMessage = await this.sock.updateMediaMessage(staleMessage);
-          this.storeMessage(updatedMessage);
-          this.persistCache();
-          return updatedMessage;
-        }
-      });
-      const mime = media.value.mimetype || media.mime;
-      return `data:${mime};base64,${Buffer.from(buffer).toString("base64")}`;
-    } catch (error) {
-      return null;
-    }
-  }
-  storeMessage(msg) {
-    const chatId = msg.key?.remoteJid;
-    if (!chatId || !hasMessagePayload(msg)) return;
-    const messageId = msg.key?.id || msg.id;
-    if (!messageId) return;
-    let msgs = this.messagesByChat.get(chatId);
-    if (!msgs) {
-      msgs = [];
-      this.messagesByChat.set(chatId, msgs);
-    }
-    const idx = msgs.findIndex((m) => (m.key?.id || m.id) === messageId);
-    if (idx === -1) msgs.push(msg);
-    else msgs[idx] = msg;
-    if (msgs.length > 5e3) msgs.splice(0, msgs.length - 5e3);
-    waUpsertMessage(chatId, messageId, messageTimestamp(msg), JSON.stringify(msg, BufferJSON?.replacer));
-  }
-  persistChats() {
-    for (const chat of this.chats) {
-      if (chat.id) waUpsertChat(chat.id, JSON.stringify(chat, BufferJSON?.replacer));
-    }
-  }
-  restoreCache() {
-    if (this.cacheLoaded) return;
-    this.cacheLoaded = true;
-    try {
-      const raw = storeGet("whatsapp", "cache");
-      const storedChats = waListChats();
-      const storedMessages = waListMessages();
-      if (storedChats.length) {
-        this.chats = storedChats.map((row) => JSON.parse(row.data, BufferJSON?.reviver));
-      }
-      if (storedMessages.length) {
-        this.messagesByChat = /* @__PURE__ */ new Map();
-        for (const row of storedMessages) {
-          const messages = this.messagesByChat.get(row.chat_id) || [];
-          messages.push(JSON.parse(row.data, BufferJSON?.reviver));
-          this.messagesByChat.set(row.chat_id, messages);
-        }
-      }
-      if (!storedChats.length && !storedMessages.length && raw) {
-        const cache = JSON.parse(raw, BufferJSON?.reviver);
-        this.chats = cache.chats || [];
-        this.messagesByChat = new Map(cache.messages || []);
-      }
-      for (const chat of this.chats) {
-        const validLastMessage = latestMessage(this.messagesByChat.get(chat.id) || []);
-        if (validLastMessage && !hasMessagePayload(chat.lastMessage)) {
-          chat.lastMessage = validLastMessage;
-          chat.lastTimestamp = messageTimestamp(validLastMessage);
-          chat.conversationTimestamp = messageTimestamp(validLastMessage);
-        }
-      }
-      console.log("[WA] cache restaurado:", this.chats.length, "chats");
-    } catch (error) {
-      console.warn("[WA] não foi possível restaurar cache:", error);
-    }
-  }
-  persistCache() {
-    if (this.persistTimer) return;
-    this.persistTimer = setTimeout(() => {
-      this.persistTimer = null;
-      try {
-        storeSet("whatsapp", "cache", JSON.stringify({
-          chats: this.chats,
-          messages: [...this.messagesByChat.entries()]
-        }, BufferJSON?.replacer));
-      } catch (error) {
-        console.warn("[WA] não foi possível persistir cache:", error);
-      }
-    }, 1e3);
-  }
-  mergeChat(chat) {
-    const contactName = contactKeys(chat.id).map((key) => this.contactNames.get(key)).find(Boolean);
-    if (contactName && isPlaceholderName(chat.name, chat.id)) return { ...chat, name: contactName };
-    return chat;
-  }
-  sortedChats() {
-    return [...this.chats].sort((a, b) => chatTimestamp(b) - chatTimestamp(a));
-  }
-  updateContacts(contacts) {
-    for (const contact of contacts || []) {
-      const name = contact.name || contact.notify || contact.verifiedName;
-      if (!contact.id || !name) continue;
-      const aliases = [contact.id, contact.lid, contact.phoneNumber, contact.pnJid].flatMap(contactKeys);
-      for (const alias of aliases) this.contactNames.set(alias, name);
-      const chat = this.chats.find((item) => aliases.some((alias) => contactKeys(item.id).includes(alias)));
-      if (chat && isPlaceholderName(chat.name, chat.id)) chat.name = name;
-    }
-  }
-  ensureChatFromMessage(msg) {
-    const chatId = msg.key?.remoteJid;
-    if (!chatId || chatId === "status@broadcast" || !hasMessagePayload(msg)) return;
-    const timestamp2 = messageTimestamp(msg);
-    const idx = this.chats.findIndex((chat) => chat.id === chatId);
-    if (idx === -1) {
-      this.chats.push(this.mergeChat({
-        id: chatId,
-        name: msg.pushName,
-        lastMessage: msg,
-        lastTimestamp: timestamp2,
-        conversationTimestamp: timestamp2
-      }));
-    } else if (timestamp2 >= chatTimestamp(this.chats[idx])) {
-      this.chats[idx].lastMessage = msg;
-      this.chats[idx].lastTimestamp = timestamp2;
-      this.chats[idx].conversationTimestamp = timestamp2;
-      if (msg.pushName && isPlaceholderName(this.chats[idx].name, chatId)) {
-        this.chats[idx].name = msg.pushName;
-      }
-    } else if (msg.pushName && isPlaceholderName(this.chats[idx].name, chatId)) {
-      this.chats[idx].name = msg.pushName;
-    }
-  }
-  async getProfilePicture(jid) {
-    if (!this.sock) return null;
-    try {
-      return await this.sock.profilePictureUrl(jid);
-    } catch {
-      return null;
-    }
-  }
-  async clearCreds() {
-    if (this.persistTimer) {
-      clearTimeout(this.persistTimer);
-      this.persistTimer = null;
-    }
-    waClearAll();
-    this.qrBase64 = null;
-    storeDelete("whatsapp", "cache");
-    this.chats = [];
-    this.messagesByChat.clear();
-    this.cacheLoaded = false;
-  }
-  async clearDatabase() {
-    if (this.persistTimer) {
-      clearTimeout(this.persistTimer);
-      this.persistTimer = null;
-    }
-    waClearData();
-    this.chats = [];
-    this.contactNames.clear();
-    this.messagesByChat.clear();
-    this.emit("chatsUpdated", []);
-    this.emit("messagesUpdated", []);
-  }
-  async sendOutboxRow(row) {
-    if (!this.sock || this.status !== "connected") throw new Error("WhatsApp não conectado");
-    const attempts = Number(row.attempts || 0) + 1;
-    waUpdateOutbox(row.id, "sending", attempts);
-    try {
-      const payload = JSON.parse(row.data);
-      if (row.kind === "text") {
-        await this.sock.sendMessage(row.chat_id, { text: payload.text });
-      } else if (row.kind === "media") {
-        const buffer = Buffer.from(payload.data, "base64");
-        const mime = String(payload.mimeType || "").toLowerCase();
-        if (mime.startsWith("image/") && mime !== "image/gif") {
-          await this.sock.sendMessage(row.chat_id, { image: buffer, caption: payload.caption || void 0, mimetype: mime });
-        } else if (mime.startsWith("video/") || mime === "image/gif") {
-          await this.sock.sendMessage(row.chat_id, {
-            video: buffer,
-            caption: payload.caption || void 0,
-            mimetype: mime === "image/gif" ? "video/mp4" : mime,
-            gifPlayback: String(payload.fileName || "").toLowerCase().endsWith(".gif")
-          });
-        } else if (mime.startsWith("audio/")) {
-          await this.sock.sendMessage(row.chat_id, { audio: buffer, mimetype: mime, ptt: true });
-        } else {
-          throw new Error("Formato de mídia não suportado");
-        }
-      } else {
-        throw new Error(`Tipo de envio desconhecido: ${row.kind}`);
-      }
-      waUpdateOutbox(row.id, "sent", attempts);
-    } catch (error) {
-      const delay = Math.min(6e4, 1e3 * 2 ** Math.min(attempts, 6));
-      waUpdateOutbox(row.id, "pending", attempts, error?.message || String(error), Date.now() + delay);
-      throw error;
-    }
-  }
-  async processOutbox() {
-    if (this.outboxRunning || !this.sock || this.status !== "connected") return;
-    this.outboxRunning = true;
-    waRecoverOutbox();
-    try {
-      for (const row of waListPendingOutbox()) {
-        if (!this.sock || this.status !== "connected") break;
-        try {
-          await this.sendOutboxRow(row);
-        } catch (error) {
-          console.warn("[WA] falha ao reenviar item da outbox:", error);
-        }
-      }
-    } finally {
-      this.outboxRunning = false;
-    }
-  }
-  async sendMessage(chatId, text) {
-    const id = waEnqueueOutbox(chatId, "text", JSON.stringify({ text }));
-    await this.sendOutboxRow({ id, chat_id: chatId, kind: "text", data: JSON.stringify({ text }), attempts: 0 });
-  }
-  async sendMedia(chatId, data, mimeType, fileName, caption = "") {
-    const buffer = Buffer.from(data instanceof ArrayBuffer ? new Uint8Array(data) : data);
-    const mime = mimeType.toLowerCase();
-    if (!(mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/"))) {
-      throw new Error("Formato de mídia não suportado");
-    }
-    const dataPayload = { data: buffer.toString("base64"), mimeType: mime, fileName, caption };
-    const id = waEnqueueOutbox(chatId, "media", JSON.stringify(dataPayload));
-    await this.sendOutboxRow({ id, chat_id: chatId, kind: "media", data: JSON.stringify(dataPayload), attempts: 0 });
-  }
-  async ensureBaileys() {
-    if (!this.initPromise) this.initPromise = loadBaileys();
-    await this.initPromise;
-  }
-  setStatus(s) {
-    this.status = s;
-    this.emit(s);
-  }
-  waitForHistoryQuiet() {
-    if (!this.historyStatusComplete) return;
-    if (this.historyCompleteTimer) clearTimeout(this.historyCompleteTimer);
-    this.historyCompleteTimer = setTimeout(() => {
-      this.historyCompleteTimer = null;
-      this.historySyncing = false;
-      this.emit("historySync", false);
-    }, 8e3);
-  }
-  async connect() {
-    await this.ensureBaileys();
-    if (this.connecting || this.status === "connected" || this.sock) return;
-    this.restoreCache();
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    this.connecting = true;
-    if (this.historyCompleteTimer) {
-      clearTimeout(this.historyCompleteTimer);
-      this.historyCompleteTimer = null;
-    }
-    this.historySyncing = true;
-    this.historyStatusComplete = false;
-    this.emit("historySync", true);
-    this.setStatus("connecting");
-    console.log("[WA] connect() chamado");
-    const { state, saveCreds } = await useSqliteAuthState();
-    this.saveCreds = saveCreds;
-    if (state?.creds?.noiseKey) {
-      const nk = state.creds.noiseKey;
-      console.log("[WA] noiseKey.public type:", nk.public?.constructor?.name, "isBuffer:", Buffer.isBuffer(nk.public));
-      console.log("[WA] noiseKey.private type:", nk.private?.constructor?.name, "isBuffer:", Buffer.isBuffer(nk.private));
-    } else {
-      console.log("[WA] WARNING: noiseKey is missing!");
-    }
-    const socket = makeWASocket({
-      auth: state,
-      printQRInTerminal: true,
-      logger: makeLogger("main"),
-      qrTimeout: 3e4,
-      shouldSyncHistoryMessage: () => true
-    });
-    this.sock = socket;
-    socket.ev.on("creds.update", saveCreds);
-    socket.ev.on("connection.update", async (update) => {
-      if (this.sock !== socket) return;
-      const keys = Object.keys(update);
-      const connectionError = disconnectDetails(update.lastDisconnect?.error);
-      console.log("[WA] connection.update diagnostic:", {
-        keys,
-        connection: update.connection,
-        qrPresent: Boolean(update.qr),
-        isNewLogin: update.isNewLogin,
-        receivedPendingNotifications: update.receivedPendingNotifications,
-        isOnline: update.isOnline,
-        hasLastDisconnect: Boolean(update.lastDisconnect),
-        lastDisconnect: connectionError
-      });
-      console.log(
-        "[WA] connection.update:",
-        JSON.stringify(keys),
-        update.qr ? "qr" : "",
-        update.connection || "",
-        connectionError?.message || ""
-      );
-      if (update.qr) {
-        let qrData = update.qr;
-        const hashIdx = qrData.indexOf("#");
-        if (hashIdx !== -1) {
-          qrData = qrData.substring(hashIdx + 1);
-          const parts = qrData.split(",");
-          if (parts.length === 5) qrData = parts.slice(0, 4).join(",");
-        }
-        console.log("[WA] QR CODE RECEBIDO");
-        this.qrBase64 = await QR.toDataURL(qrData);
-        this.emit("qr", this.qrBase64);
-        if (this.qrTimeout) {
-          clearTimeout(this.qrTimeout);
-          this.qrTimeout = null;
-        }
-      }
-      if (update.connection === "connecting") {
-        this.setStatus("connecting");
-      }
-      if (update.connection === "open") {
-        console.log("[WA] CONECTADO!");
-        this.connecting = false;
-        this.qrBase64 = null;
-        this.setStatus("connected");
-        await this.loadChats();
-        this.processOutbox().catch((error) => console.warn("[WA] erro processando outbox:", error));
-      }
-      if (update.connection === "close") {
-        const disconnectError = update.lastDisconnect?.error;
-        const code = disconnectError?.output?.statusCode;
-        const numericCode = Number(code);
-        const isRestartRequired = numericCode === 515 || String(disconnectError?.message || "").toLowerCase().includes("restart required");
-        console.log("[WA] desconectado, motivo:", code);
-        console.log("[WA] restartRequired:", isRestartRequired, "statusCode:", numericCode);
-        console.log("[WA] disconnect diagnostic:", {
-          code,
-          numericCode,
-          isRestartRequired,
-          error: disconnectDetails(disconnectError)
-        });
-        const shouldReconnect = isRestartRequired;
-        this.connecting = false;
-        this.sock = null;
-        this.qrBase64 = null;
-        if (this.historyCompleteTimer) {
-          clearTimeout(this.historyCompleteTimer);
-          this.historyCompleteTimer = null;
-        }
-        this.historySyncing = false;
-        this.historyStatusComplete = false;
-        if (shouldReconnect) {
-          console.log("[WA] reinício solicitado pelo servidor, reconectando...");
-          this.setStatus("connecting");
-          this.reconnectTimer = setTimeout(() => {
-            this.reconnectTimer = null;
-            this.connect().catch((error) => console.error("[WA] erro ao reiniciar conexão:", error));
-          }, 500);
-          return;
-        }
-        this.setStatus("disconnected");
-        const errorMessage = numericCode === 401 ? "A sessão do WhatsApp foi rejeitada. Limpe os tokens e leia um novo QR Code." : `A conexão do WhatsApp foi encerrada${code ? ` (${code})` : ""}.`;
-        this.emit("error", errorMessage);
-      }
-    });
-    socket.ev.on("messaging-history.set", ({ chats, contacts, messages, syncType, progress, isLatest, chunkOrder, peerDataRequestSessionId }) => {
-      this.updateContacts(contacts || []);
-      if (chats) {
-        for (const rawChat of chats) {
-          const chat = this.mergeChat(rawChat);
-          const idx = this.chats.findIndex((c) => c.id === chat.id);
-          if (idx === -1) this.chats.push(chat);
-        }
-      }
-      if (messages) {
-        for (const msg of messages) {
-          this.storeMessage(msg);
-          this.ensureChatFromMessage(msg);
-        }
-      }
-      this.persistChats();
-      console.log("[WA] history sync:", {
-        chats: chats?.length || 0,
-        contacts: contacts?.length || 0,
-        messages: messages?.length || 0,
-        syncType,
-        progress,
-        isLatest,
-        chunkOrder,
-        peerDataRequestSessionId
-      });
-      this.persistCache();
-      this.emit("chatsUpdated", this.sortedChats());
-      this.emit("messagesUpdated", [...new Set((messages || []).map((message) => message.key?.remoteJid).filter(Boolean))]);
-      this.waitForHistoryQuiet();
-    });
-    socket.ev.on("messaging-history.status", (status) => {
-      console.log("[WA] history status:", status.syncType, status.status, "explicit:", status.explicit);
-      if (status.status === "complete" || status.status === "paused") {
-        this.historyStatusComplete = true;
-        this.waitForHistoryQuiet();
-      }
-    });
-    socket.ev.on("chats.upsert", (chats) => {
-      for (const rawChat of chats || []) {
-        const chat = this.mergeChat(rawChat);
-        const idx = this.chats.findIndex((c) => c.id === chat.id);
-        if (idx === -1) this.chats.push(chat);
-        else {
-          const previous = this.chats[idx];
-          this.chats[idx] = { ...previous, ...chat };
-          if (chat.lastMessage && !hasMessagePayload(chat.lastMessage) && hasMessagePayload(previous.lastMessage)) {
-            this.chats[idx].lastMessage = previous.lastMessage;
-          }
-        }
-      }
-      this.persistChats();
-      this.emit("chatsUpdated", this.sortedChats());
-      this.persistCache();
-    });
-    socket.ev.on("chats.update", (updates) => {
-      for (const update of updates || []) {
-        const idx = this.chats.findIndex((c) => c.id === update.id);
-        if (idx !== -1) {
-          const previous = this.chats[idx];
-          const merged = this.mergeChat(update);
-          Object.assign(this.chats[idx], merged);
-          if (merged.lastMessage && !hasMessagePayload(merged.lastMessage) && hasMessagePayload(previous.lastMessage)) {
-            this.chats[idx].lastMessage = previous.lastMessage;
-          }
-        }
-      }
-      this.persistChats();
-      this.emit("chatsUpdated", this.sortedChats());
-      this.persistCache();
-    });
-    socket.ev.on("contacts.upsert", (contacts) => {
-      this.updateContacts(contacts || []);
-      this.persistChats();
-      this.emit("chatsUpdated", this.sortedChats());
-      this.persistCache();
-    });
-    socket.ev.on("contacts.update", (updates) => {
-      this.updateContacts(updates || []);
-      this.persistChats();
-      this.emit("chatsUpdated", this.sortedChats());
-      this.persistCache();
-    });
-    socket.ev.on("chats.delete", (ids) => {
-      if (this.historyFetches > 0) return;
-      this.chats = this.chats.filter((c) => !ids.includes(c.id));
-      this.persistChats();
-      this.emit("chatsUpdated", this.chats);
-      this.persistCache();
-    });
-    socket.ev.on("messages.upsert", async ({ messages }) => {
-      for (const msg of messages) {
-        this.storeMessage(msg);
-        this.ensureChatFromMessage(msg);
-        if (msg.key?.remoteJid) this.emit("message", msg);
-      }
-      this.persistChats();
-      this.emit("chatsUpdated", this.sortedChats());
-      this.persistCache();
-    });
-    this.qrTimeout = setTimeout(() => {
-      if (this.connecting && !this.qrBase64) {
-        console.log("[WA] TIMEOUT: QR não gerado após 30s");
-        this.emit("error", "QR Code não foi gerado. Verifique sua conexão com a internet.");
-        this.disconnect();
-      }
-    }, 3e4);
-  }
-  async loadChats() {
-    if (!this.sock) return;
-    console.log("[WA] chats disponíveis:", this.chats.length);
-    this.emit("chatsUpdated", this.sortedChats());
-    this.persistCache();
-  }
-  async disconnect() {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
-    if (this.qrTimeout) {
-      clearTimeout(this.qrTimeout);
-      this.qrTimeout = null;
-    }
-    if (this.historyCompleteTimer) {
-      clearTimeout(this.historyCompleteTimer);
-      this.historyCompleteTimer = null;
-    }
-    this.connecting = false;
-    this.sock?.end(new Error("manual disconnect"));
-    this.sock = null;
-    this.chats = [];
-    this.contactNames.clear();
-    this.messagesByChat.clear();
-    this.historySyncing = false;
-    this.historyStatusComplete = false;
-    this.setStatus("disconnected");
-  }
-}
-const whatsappService = new WhatsAppService();
 function handleNetworkError(details) {
   debug.networkError(details);
 }
@@ -1022,470 +92,1093 @@ function safeErrorMessage(error, fallback = "Operação falhou") {
   }
   return message.length > 500 ? `${message.slice(0, 500)}...` : message;
 }
-function handleRenderError(details) {
-  debug.renderError(details);
+let db = null;
+function getAppSetting(key) {
+  const row = getDb().prepare("SELECT value FROM store WHERE namespace = ? AND key = ?").get("app", key);
+  return row?.value;
 }
-const IG_APP_ID = process.env.IG_APP_ID || "936619743392459";
-const BASE = process.env.IG_BASE_URL || "https://www.instagram.com";
-const API = `${BASE}/api/v1`;
-const MOBILE_BASE = process.env.IG_MOBILE_BASE_URL || "https://i.instagram.com";
-const MOBILE_API = `${MOBILE_BASE}/api/v1`;
-const USER_AGENT = process.env.IG_USER_AGENT || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
-function summarizeResponseBody(body, contentType) {
-  if (contentType.toLowerCase().includes("text/html") || /<html[\s>]/i.test(body)) {
-    return `[HTML omitido; ${body.length} caracteres]`;
-  }
-  const compact = body.replace(/\s+/g, " ").trim();
-  return compact.length > 500 ? `${compact.slice(0, 500)}...` : compact;
+function setAppSetting(key, value) {
+  getDb().prepare("INSERT OR REPLACE INTO store (namespace, key, value) VALUES (?, ?, ?)").run("app", key, value);
 }
-class InstagramService extends events.EventEmitter {
-  cookies = null;
-  status = "disconnected";
-  threads = [];
-  pollTimer = null;
-  webWindow = null;
-  realtimeSocketIds = /* @__PURE__ */ new Set();
-  realtimeSeenMessageIds = /* @__PURE__ */ new Set();
-  realtimeAttached = false;
-  getStatus() {
-    return this.status;
+function getDb() {
+  if (db) return db;
+  const directory = path.join(electron.app.getPath("userData"), "data");
+  fs.mkdirSync(directory, { recursive: true });
+  db = new Database(path.join(directory, "message-manager.db"));
+  db.pragma("journal_mode = WAL");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS store (
+      namespace TEXT NOT NULL,
+      key TEXT NOT NULL,
+      value TEXT,
+      PRIMARY KEY (namespace, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS scheduled_messages (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL DEFAULT 'instagram',
+      conversation_id TEXT,
+      message TEXT NOT NULL,
+      scheduled_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_scheduled_messages_date
+      ON scheduled_messages (scheduled_at, status);
+
+    CREATE TABLE IF NOT EXISTS automation_flows (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      priority INTEGER NOT NULL DEFAULT 0,
+      definition TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_states (
+      platform TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      conversation_id TEXT NOT NULL,
+      flow_id TEXT,
+      state TEXT NOT NULL DEFAULT 'new',
+      variables TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (platform, account_id, conversation_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS processed_messages (
+      platform TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      message_id TEXT NOT NULL,
+      processed_at TEXT NOT NULL,
+      PRIMARY KEY (platform, account_id, message_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS automation_logs (
+      id TEXT PRIMARY KEY,
+      at TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      conversation TEXT NOT NULL,
+      action TEXT NOT NULL,
+      status TEXT NOT NULL,
+      detail TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_automation_logs_at
+      ON automation_logs (at DESC);
+  `);
+  return db;
+}
+function listScheduledMessages() {
+  return getDb().prepare(`
+    SELECT id, platform, conversation_id AS conversationId, message,
+      scheduled_at AS scheduledAt, status, created_at AS createdAt, updated_at AS updatedAt
+    FROM scheduled_messages
+    ORDER BY scheduled_at ASC
+  `).all();
+}
+function insertScheduledMessage(item) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  getDb().prepare(`
+    INSERT INTO scheduled_messages
+      (id, platform, conversation_id, message, scheduled_at, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      platform = excluded.platform,
+      conversation_id = excluded.conversation_id,
+      message = excluded.message,
+      scheduled_at = excluded.scheduled_at,
+      updated_at = excluded.updated_at
+  `).run(item.id, item.platform || "instagram", item.conversationId || null, item.message, item.at, item.createdAt || now, now);
+}
+function deleteScheduledMessage(id) {
+  getDb().prepare("DELETE FROM scheduled_messages WHERE id = ?").run(id);
+}
+function listAutomationFlows() {
+  return getDb().prepare(`
+    SELECT id, name, enabled, priority, definition,
+      created_at AS createdAt, updated_at AS updatedAt
+    FROM automation_flows ORDER BY priority DESC, created_at ASC
+  `).all().map((flow) => ({ ...flow, enabled: Boolean(flow.enabled) }));
+}
+function upsertAutomationFlow(flow) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  getDb().prepare(`
+    INSERT INTO automation_flows (id, name, enabled, priority, definition, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      enabled = excluded.enabled,
+      priority = excluded.priority,
+      definition = excluded.definition,
+      updated_at = excluded.updated_at
+  `).run(flow.id, flow.name, flow.enabled ? 1 : 0, flow.priority || 0, flow.definition, flow.createdAt || now, now);
+}
+function deleteAutomationFlow(id) {
+  getDb().prepare("DELETE FROM automation_flows WHERE id = ?").run(id);
+}
+function upsertConversationState(state) {
+  const updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  getDb().prepare(`
+    INSERT INTO conversation_states
+      (platform, account_id, conversation_id, flow_id, state, variables, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(platform, account_id, conversation_id) DO UPDATE SET
+      flow_id = excluded.flow_id,
+      state = excluded.state,
+      variables = excluded.variables,
+      updated_at = excluded.updated_at
+  `).run(state.platform, state.accountId || "", state.conversationId, state.flowId || null, state.currentState, state.variables || "{}", updatedAt);
+}
+function listProcessedMessageIds(platform, accountId = "") {
+  return getDb().prepare(`
+    SELECT message_id FROM processed_messages
+    WHERE platform = ? AND account_id = ?
+    ORDER BY processed_at DESC LIMIT 1000
+  `).all(platform, accountId).map((row) => row.message_id);
+}
+function markProcessedMessage(platform, messageId, accountId = "") {
+  getDb().prepare(`
+    INSERT OR IGNORE INTO processed_messages (platform, account_id, message_id, processed_at)
+    VALUES (?, ?, ?, ?)
+  `).run(platform, accountId, messageId, (/* @__PURE__ */ new Date()).toISOString());
+  getDb().prepare(`
+    DELETE FROM processed_messages
+    WHERE platform = ? AND account_id = ?
+      AND message_id NOT IN (
+        SELECT message_id FROM processed_messages
+        WHERE platform = ? AND account_id = ?
+        ORDER BY processed_at DESC LIMIT 1000
+      )
+  `).run(platform, accountId, platform, accountId);
+}
+function resetAutomationRuntime() {
+  getDb().exec("DELETE FROM processed_messages; DELETE FROM conversation_states;");
+}
+function listAutomationLogs() {
+  return getDb().prepare(`
+    SELECT id, at, platform, conversation, action, status, detail
+    FROM automation_logs ORDER BY at DESC LIMIT 200
+  `).all();
+}
+function insertAutomationLog(log) {
+  getDb().prepare(`
+    INSERT OR REPLACE INTO automation_logs
+      (id, at, platform, conversation, action, status, detail)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(log.id, log.at, log.platform, log.conversation, log.action, log.status, log.detail);
+  getDb().prepare(`
+    DELETE FROM automation_logs
+    WHERE id NOT IN (SELECT id FROM automation_logs ORDER BY at DESC LIMIT 200)
+  `).run();
+}
+function clearAutomationLogs() {
+  getDb().prepare("DELETE FROM automation_logs").run();
+}
+const DEFAULT_SIDEBAR_WIDTH = 200;
+const OFFICIAL_VIEWS_HEADER_HEIGHT = 52;
+const MIN_SINGLE_VIEW_WIDTH = 900;
+const MIN_SPLIT_VIEW_WIDTH = 1200;
+const CHROME_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+const INSTAGRAM_ROUTES = {
+  inbox: "https://www.instagram.com/direct/inbox/",
+  requests: "https://www.instagram.com/direct/requests/",
+  hidden: "https://www.instagram.com/direct/requests/hidden/"
+};
+const AUTOMATION_DEBUG_LOG = path.join(process.cwd(), "automation-debug.log");
+function writeAutomationDebug(event, data = {}) {
+  try {
+    fs.appendFileSync(AUTOMATION_DEBUG_LOG, `${(/* @__PURE__ */ new Date()).toISOString()} ${event} ${JSON.stringify(data)}
+`, "utf8");
+  } catch {
   }
-  getThreads() {
-    return this.threads;
+}
+const createInstagramAutoReplyScript = (text, prime, allowProcessed, flows, processedMessageIds, knownStates, automaticReplies) => `(() => {
+  const fallbackReply = ${JSON.stringify(text)}
+  const flows = ${JSON.stringify(flows)}
+  const automaticReplies = ${JSON.stringify(automaticReplies)}
+  const processedMessageIds = new Set(${JSON.stringify(processedMessageIds)})
+  const knownStates = ${JSON.stringify(knownStates)}
+  const primeOnly = ${prime}
+  const allowProcessedOnce = ${allowProcessed}
+  const ownPrefix = /(?:^|\\s)(você|voce|you|tu|tú|vos)\\s*:/i
+  const markers = [...document.querySelectorAll('[data-visualcompletion="ignore"]')]
+    .filter(element => /^(unread|não lida|nao lida|no leída|no leida)$/i.test((element.textContent || '').trim()))
+  const observedStates = {}
+  const diagnostic = { url: location.href, rows: 0, markers: markers.length, eligible: 0, skippedState: 0, skippedProcessed: 0, skippedReply: 0, automaticReplies: automaticReplies.length, activeAutomaticReply: false }
+  const getPreview = row => {
+    const unreadPattern = /^(unread|não lida|nao lida|no leída|no leida)$/i
+    const previews = [...row.querySelectorAll('[data-visualcompletion="ignore"]')]
+      .map(element => (element.textContent || '').replace(/\\s+/g, ' ').trim())
+      .filter(text => text && !unreadPattern.test(text))
+    return previews[0] || ''
   }
-  getCachedThreads(folder) {
-    return instagramListThreads(folder).map((row) => JSON.parse(row.data));
+
+  for (const row of document.querySelectorAll('[role="button"]')) {
+    if (row.querySelectorAll('img[alt="user-profile-picture"]').length !== 1) continue
+    const name = row.querySelector('span[title]')?.getAttribute('title') || ''
+    const profileLink = row.querySelector('a[aria-label^="Open the profile page of"]')
+    const profileLabel = profileLink?.getAttribute('aria-label') || ''
+    const username = profileLabel.replace(/^Open the profile page of\\s*/i, '').trim()
+    const profile = profileLink?.getAttribute('href') || username || name
+    observedStates[profile] = getPreview(row)
   }
-  cookieString() {
-    if (!this.cookies) return "";
-    const cookies = {
-      ...this.cookies.extra,
-      sessionid: this.cookies.sessionid,
-      csrftoken: this.cookies.csrftoken,
-      ds_user_id: this.cookies.ds_user_id
+  diagnostic.rows = Object.keys(observedStates).length
+
+  const sleep = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
+  const isWithinSchedule = schedule => {
+    if (!schedule?.start || !schedule?.end) return true
+    const current = new Date()
+    const now = current.getHours() * 60 + current.getMinutes()
+    const [startHour, startMinute] = schedule.start.split(':').map(Number)
+    const [endHour, endMinute] = schedule.end.split(':').map(Number)
+    const start = startHour * 60 + startMinute
+    const end = endHour * 60 + endMinute
+    return start <= end ? now >= start && now < end : now >= start || now < end
+  }
+  const getScheduledAutomaticReply = () => automaticReplies.find(reply => reply.message && isWithinSchedule(reply))?.message || ''
+  const returnToInbox = () => {
+    const inboxLink = document.querySelector('a[href="/direct/inbox/"]')
+    if (inboxLink) inboxLink.click()
+    else window.location.assign('/direct/inbox/')
+  }
+  const run = async () => {
+    for (const marker of markers) {
+      const row = marker.closest('[role="button"]')
+      if (!row) continue
+      if (row.querySelectorAll('img[alt="user-profile-picture"]').length !== 1) continue
+      diagnostic.eligible++
+      const preview = getPreview(row)
+      if (ownPrefix.test(preview)) continue
+      const normalizedPreview = preview.toLocaleLowerCase()
+      const scheduledReply = getScheduledAutomaticReply()
+      diagnostic.activeAutomaticReply = Boolean(scheduledReply)
+      let reply = scheduledReply || fallbackReply
+      let selectedFlowId = null
+      for (const flow of flows) {
+        if (flow.keywords.some(keyword => normalizedPreview.includes(keyword))) {
+          reply = flow.response
+          selectedFlowId = flow.id
+          break
+        }
+      }
+      if (reply === fallbackReply) {
+        const fallbackFlow = flows.find(flow => flow.fallbackResponse)
+        if (fallbackFlow) {
+          reply = fallbackFlow.fallbackResponse
+          selectedFlowId = fallbackFlow.id
+        }
+      }
+      if (!reply || !reply.trim()) {
+        diagnostic.skippedReply++
+        continue
+      }
+      const visibleName = row.querySelector('span[title]')?.getAttribute('title') || ''
+      const profileLink = row.querySelector('a[aria-label^="Open the profile page of"]')
+      const profileLabel = profileLink?.getAttribute('aria-label') || ''
+      const username = profileLabel.replace(/^Open the profile page of\\s*/i, '').trim()
+      const name = visibleName || username
+      const profile = profileLink?.getAttribute('href') || username || name
+
+      row.click()
+      await sleep(800)
+      const header = document.querySelector('[data-pagelet="IGDInboxHeaderOffMsys"]')
+      if (!header || header.querySelectorAll('img[alt="user-profile-picture"]').length !== 1) {
+        returnToInbox()
+        continue
+      }
+      const messageGroups = [...document.querySelectorAll('[data-pagelet="IGDMessagesList"] [role="group"]')]
+      const lastMessage = messageGroups[messageGroups.length - 1]
+      const senderProfile = lastMessage?.querySelector('a[aria-label^="Open the profile page of"]')
+      if (!lastMessage || !senderProfile) {
+        diagnostic.skippedState++
+        returnToInbox()
+        continue
+      }
+      const messageText = (lastMessage.textContent || '').replace(/s+/g, ' ').trim()
+      const messageTime = lastMessage.querySelector('abbr[aria-label]')?.getAttribute('aria-label') || ''
+      const key = profile + '|' + messageText + '|' + messageTime
+      if (processedMessageIds.has(key) && !allowProcessedOnce) {
+        diagnostic.skippedProcessed++
+        returnToInbox()
+        continue
+      }
+      const composer = document.querySelector('[data-pagelet="IGDComposerForCannes"] [contenteditable="true"][role="textbox"][data-lexical-editor="true"]')
+      if (!composer) {
+        returnToInbox()
+        continue
+      }
+      composer.focus()
+      document.execCommand('insertText', false, reply)
+      await sleep(100)
+      composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }))
+      await sleep(250)
+      returnToInbox()
+      return { status: 'sent', conversation: name || 'Conversa sem nome', conversationId: profile, ownState: 'Você: ' + reply, flowId: selectedFlowId, messageId: key, states: observedStates, diagnostic }
+    }
+    return { status: 'idle', states: observedStates, diagnostic }
+  }
+  return run()
+})()`;
+const UNREAD_SCRIPT = `(() => {
+  const selectors = [
+    '[data-testid="icon-unread-count"]',
+    '[data-testid="icon-unread"]',
+    '[aria-label*="unread" i]',
+    '[aria-label*="não lida" i]',
+    '[aria-label*="no leída" i]',
+    '[aria-label*="no leído" i]'
+  ]
+  const containers = new Set()
+  const addContainer = element => {
+    const item = element.closest('[role="listitem"], [role="gridcell"], [data-testid*="chat"], [data-testid*="thread"]') || element
+    containers.add(item)
+  }
+  for (const selector of selectors) {
+    for (const element of document.querySelectorAll(selector)) {
+      addContainer(element)
+    }
+  }
+
+  for (const element of document.querySelectorAll('[data-visualcompletion="ignore"]')) {
+    const text = (element.textContent || '').trim().toLowerCase()
+    if (/^(unread|não lida|nao lida|no leída|no leida)$/.test(text)) addContainer(element)
+  }
+
+  // Instagram uses a small blue dot for unread conversations without a number.
+  const blueDot = element => {
+    const style = getComputedStyle(element)
+    const color = style.backgroundColor.replace(/\\s/g, '')
+    const width = element.getBoundingClientRect().width
+    const height = element.getBoundingClientRect().height
+    return /rgb\\(0,149,246\\)|rgb\\(0,150,246\\)|#0095f6/i.test(color) && width >= 4 && width <= 14 && height >= 4 && height <= 14 && style.borderRadius !== '0px'
+  }
+  const bluePseudoDot = (element, pseudo) => {
+    const style = getComputedStyle(element, pseudo)
+    const width = Number.parseFloat(style.width)
+    const height = Number.parseFloat(style.height)
+    const color = style.backgroundColor.replace(/\\s/g, '')
+    return /rgb\\(0,149,246\\)|rgb\\(0,150,246\\)|#0095f6/i.test(color) && width >= 4 && width <= 14 && height >= 4 && height <= 14 && style.borderRadius !== '0px'
+  }
+  for (const element of document.querySelectorAll('div, span')) {
+    if (blueDot(element) || bluePseudoDot(element, '::before') || bluePseudoDot(element, '::after')) addContainer(element)
+  }
+  return containers.size
+})()`;
+const PREPARE_PROBE_SCRIPT = `(() => {
+  const containers = [...document.querySelectorAll('body *')]
+    .filter(element => {
+      const style = getComputedStyle(element)
+      return element.scrollHeight > element.clientHeight + 80 && /(auto|scroll)/.test(style.overflowY)
+    })
+    .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight))
+  for (const container of containers.slice(0, 3)) container.scrollTop = container.scrollHeight
+})()`;
+const INSTAGRAM_REQUESTS_SCRIPT = `(() => {
+  const requestPattern = /(?:solicitaç(?:ão|ões)|solicitud(?:es)?|message requests?|hidden requests?|solicitações ocultas|solicitudes ocultas)/i
+  const numberPattern = /(?:^|\\s|\\()([0-9]{1,3})(?:\\s|$|\\))/
+  const targets = new Set()
+
+  for (const element of document.querySelectorAll('a, button, [role="button"], [aria-label]')) {
+    const text = [element.textContent || '', element.getAttribute('aria-label') || ''].join(' ').trim()
+    if (!requestPattern.test(text)) continue
+    targets.add(element.closest('a, button, [role="button"]') || element)
+  }
+
+  const counts = { requests: 0, hidden: 0, rows: 0 }
+  for (const target of targets) {
+    const candidates = [target, ...target.querySelectorAll('[aria-label], [data-testid], span')]
+    let count = 0
+    for (const candidate of candidates) {
+      const text = [candidate.textContent || '', candidate.getAttribute('aria-label') || ''].join(' ').trim()
+      const match = text.match(numberPattern)
+      if (match) count = Math.max(count, Number(match[1]))
+      if (candidate.matches('[data-testid*="unread" i], [aria-label*="unread" i], [aria-label*="não lida" i]')) count = Math.max(count, 1)
+    }
+    const text = target.textContent || ''
+    if (/hidden|ocult|oculta|ocultas/i.test(text)) counts.hidden += count
+    else counts.requests += count
+  }
+
+  const requestRows = new Set()
+  for (const element of document.querySelectorAll('button, [role="button"]')) {
+    const text = (element.textContent || '').trim()
+    if (!/(confirmar|confirm|aceitar|accept|excluir|delete|remover|remove|recusar|decline)/i.test(text)) continue
+    requestRows.add(element.closest('[role="listitem"], [role="row"]') || element.parentElement?.parentElement || element.parentElement)
+  }
+  counts.rows = requestRows.size
+  return counts
+})()`;
+const DIGITS = {
+  "0": ["111", "101", "101", "101", "111"],
+  "1": ["010", "110", "010", "010", "111"],
+  "2": ["111", "001", "111", "100", "111"],
+  "3": ["111", "001", "111", "001", "111"],
+  "4": ["101", "101", "111", "001", "001"],
+  "5": ["111", "100", "111", "001", "111"],
+  "6": ["111", "100", "111", "101", "111"],
+  "7": ["111", "001", "001", "001", "001"],
+  "8": ["111", "101", "111", "101", "111"],
+  "9": ["111", "101", "111", "001", "111"],
+  "+": ["000", "010", "111", "010", "000"]
+};
+function crc32(buffer) {
+  let crc = 4294967295;
+  for (const byte of buffer) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit++) crc = crc >>> 1 ^ (crc & 1 ? 3988292384 : 0);
+  }
+  const result = Buffer.allocUnsafe(4);
+  result.writeUInt32BE((crc ^ 4294967295) >>> 0, 0);
+  return result;
+}
+function pngChunk(type, data) {
+  const typeBuffer = Buffer.from(type, "ascii");
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length, 0);
+  return Buffer.concat([length, typeBuffer, data, crc32(Buffer.concat([typeBuffer, data]))]);
+}
+function createTaskbarBadge(count) {
+  const size = 16;
+  const pixels = Buffer.alloc(size * size * 4);
+  const label = count > 99 ? "99+" : String(count);
+  const glyphWidth = 3;
+  const glyphGap = 1;
+  const textWidth = label.length * glyphWidth + (label.length - 1) * glyphGap;
+  const textX = Math.floor((size - textWidth) / 2);
+  const textY = 5;
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const distance = Math.hypot(x - 7.5, y - 7.5);
+      if (distance > 7.5) continue;
+      const offset = (y * size + x) * 4;
+      pixels[offset] = 229;
+      pixels[offset + 1] = 57;
+      pixels[offset + 2] = 53;
+      pixels[offset + 3] = 255;
+    }
+  }
+  for (let character = 0; character < label.length; character++) {
+    const glyph = DIGITS[label[character]];
+    const startX = textX + character * (glyphWidth + glyphGap);
+    for (let y = 0; y < glyph.length; y++) {
+      for (let x = 0; x < glyph[y].length; x++) {
+        if (glyph[y][x] !== "1") continue;
+        const pixelX = startX + x;
+        const pixelY = textY + y;
+        const offset = (pixelY * size + pixelX) * 4;
+        pixels[offset] = 255;
+        pixels[offset + 1] = 255;
+        pixels[offset + 2] = 255;
+        pixels[offset + 3] = 255;
+      }
+    }
+  }
+  const scanlines = Buffer.alloc(size * (size * 4 + 1));
+  for (let y = 0; y < size; y++) {
+    scanlines[y * (size * 4 + 1)] = 0;
+    pixels.copy(scanlines, y * (size * 4 + 1) + 1, y * size * 4, (y + 1) * size * 4);
+  }
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(size, 0);
+  header.writeUInt32BE(size, 4);
+  header[8] = 8;
+  header[9] = 6;
+  return Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", zlib.deflateSync(scanlines)),
+    pngChunk("IEND", Buffer.alloc(0))
+  ]);
+}
+class OfficialViews {
+  window = null;
+  instagram = null;
+  instagramHeader = null;
+  instagramProbe = null;
+  instagramAutomationProbe = null;
+  whatsapp = null;
+  visible = false;
+  sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
+  zoomPercent = 100;
+  audioVolume = 100;
+  viewMode = "both";
+  unreadTimer = null;
+  unreadRefreshTimer = null;
+  automationTimer = null;
+  unreadPolling = false;
+  instagramProbeBusy = false;
+  automationEnabled = false;
+  automationGlobalEnabled = false;
+  automationText = "";
+  automaticReplies = [];
+  automationPrimed = false;
+  automationBusy = false;
+  automationKnownStates = {};
+  automationAllowProcessedOnce = false;
+  lastAutomationDiagnostic = "";
+  unreadCount = -1;
+  instagramCounts = { inbox: 0, requests: 0, hidden: 0 };
+  automationLogs = [];
+  isVisible() {
+    return this.visible;
+  }
+  attach(window) {
+    this.window = window;
+    this.automationGlobalEnabled = getAppSetting("automation-global-enabled") === "true";
+    this.automationEnabled = getAppSetting("automation-enabled") === "true";
+    this.automationText = getAppSetting("automation-text") || "";
+    try {
+      const savedReplies = JSON.parse(getAppSetting("automatic-replies") || "[]");
+      this.automaticReplies = Array.isArray(savedReplies) ? savedReplies.filter((reply) => reply.message?.trim()).map((reply) => ({ message: reply.message.trim(), start: reply.start, end: reply.end })) : [];
+    } catch {
+      this.automaticReplies = [];
+    }
+    window.on("resize", () => this.resize());
+    window.on("closed", () => {
+      this.window = null;
+      this.instagram = null;
+      this.instagramHeader = null;
+      if (this.instagramProbe && !this.instagramProbe.webContents.isDestroyed()) this.instagramProbe.webContents.close();
+      this.instagramProbe = null;
+      if (this.instagramAutomationProbe && !this.instagramAutomationProbe.webContents.isDestroyed()) this.instagramAutomationProbe.webContents.close();
+      this.instagramAutomationProbe = null;
+      this.whatsapp = null;
+      this.visible = false;
+      this.stopUnreadPolling();
+      this.updateTaskbarBadge(0);
+    });
+    this.syncAutomationState();
+  }
+  async toggle() {
+    if (this.visible) {
+      this.hide();
+      return false;
+    }
+    await this.show();
+    return true;
+  }
+  reload() {
+    for (const view of [this.instagram, this.whatsapp]) {
+      if (view && !view.webContents.isDestroyed()) {
+        view.webContents.reloadIgnoringCache();
+      }
+    }
+  }
+  setSidebarWidth(width) {
+    this.sidebarWidth = Math.max(64, Math.min(320, Math.round(width)));
+    this.resize();
+  }
+  setZoom(percent) {
+    this.zoomPercent = Math.max(50, Math.min(150, Math.round(percent)));
+    for (const view of [this.instagram, this.whatsapp]) {
+      if (view && !view.webContents.isDestroyed()) {
+        view.webContents.setZoomFactor(this.zoomPercent / 100);
+      }
+    }
+  }
+  setAudioVolume(volume) {
+    this.audioVolume = Math.max(0, Math.min(100, Math.round(volume)));
+    for (const view of [this.instagram, this.whatsapp]) {
+      this.applyAudioVolume(view);
+    }
+  }
+  getAudioVolume() {
+    return this.audioVolume;
+  }
+  applyAudioVolume(view) {
+    if (!view || view.webContents.isDestroyed()) return;
+    view.webContents.setAudioMuted(this.audioVolume === 0);
+    const hideInstagramControls = view === this.instagram;
+    const hideWhatsAppControls = view === this.whatsapp;
+    void view.webContents.executeJavaScript(`(() => {
+      const volume = ${this.audioVolume / 100}
+      const apply = media => {
+        media.volume = volume
+        media.muted = volume === 0
+        media.controls = false
+      }
+      const hideControls = () => {
+        if (${hideInstagramControls}) {
+          let style = document.getElementById('message-manager-hide-audio-controls')
+          if (!style) {
+            style = document.createElement('style')
+            style.id = 'message-manager-hide-audio-controls'
+            style.textContent = 'video::-webkit-media-controls-volume-control-container, video::-webkit-media-controls-mute-button, [role="slider"][aria-valuemin="0"][aria-valuemax="100"] { display: none !important; }'
+            document.documentElement.appendChild(style)
+          }
+          const audioPattern = /volume|audio|sound|mute|unmute|som|silenc/i
+          document.querySelectorAll('button, [role="button"], [aria-label], [title], [data-testid], [data-tooltip-content]').forEach(control => {
+            const label = [
+              control.getAttribute('aria-label') || '',
+              control.getAttribute('title') || '',
+              control.getAttribute('data-testid') || '',
+              control.getAttribute('data-tooltip-content') || ''
+            ].join(' ')
+            if (audioPattern.test(label)) control.style.display = 'none'
+          })
+        }
+        if (${hideWhatsAppControls}) {
+          const volumeBar = document.querySelector('[data-testid="volume-bar-container"]')
+          const volumeControl = volumeBar?.parentElement
+          if (volumeControl) volumeControl.style.display = 'none'
+          document.querySelectorAll('[data-testid="video-volume"], [data-testid="volume-bar-container"], input[aria-label="Volume"]').forEach(control => {
+            control.style.display = 'none'
+          })
+        }
+      }
+      const applyAll = () => {
+        document.querySelectorAll('audio, video').forEach(apply)
+        hideControls()
+      }
+      document.querySelectorAll('audio, video').forEach(apply)
+      window.__messageManagerAudioApply = applyAll
+      if (!window.__messageManagerAudioObserver) {
+        window.__messageManagerAudioObserver = new MutationObserver(() => {
+          window.__messageManagerAudioApply?.()
+        })
+        window.__messageManagerAudioObserver.observe(document.documentElement, { childList: true, subtree: true })
+      }
+      applyAll()
+    })()`, true).catch(() => {
+    });
+  }
+  setViewMode(mode) {
+    this.viewMode = mode === "instagram" || mode === "whatsapp" ? mode : "both";
+    if (!this.window || this.window.isDestroyed()) return;
+    this.window.setMinimumSize(this.viewMode === "both" ? MIN_SPLIT_VIEW_WIDTH : MIN_SINGLE_VIEW_WIDTH, 600);
+    if (!this.visible) return;
+    for (const view of [this.instagramHeader, this.instagram, this.whatsapp]) {
+      if (view) this.window.contentView.removeChildView(view);
+    }
+    if (this.viewMode !== "whatsapp" && this.instagramHeader) this.window.contentView.addChildView(this.instagramHeader);
+    if (this.viewMode === "instagram" && this.instagram) this.window.contentView.addChildView(this.instagram);
+    if (this.viewMode === "whatsapp" && this.whatsapp) this.window.contentView.addChildView(this.whatsapp);
+    if (this.viewMode === "both") {
+      if (this.instagram) this.window.contentView.addChildView(this.instagram);
+      if (this.whatsapp) this.window.contentView.addChildView(this.whatsapp);
+    }
+    this.resize();
+  }
+  getUnreadCount() {
+    return Math.max(0, this.unreadCount);
+  }
+  getInstagramCounts() {
+    return this.instagramCounts;
+  }
+  getAutomationStatus() {
+    const configured = this.hasConfiguredAutomation();
+    return {
+      enabled: this.automationGlobalEnabled && configured,
+      configured,
+      globalEnabled: this.automationGlobalEnabled,
+      running: this.automationBusy
     };
-    return Object.entries(cookies).map(([name, value]) => `${name}=${value}`).join("; ");
   }
-  async getWebWindow() {
-    if (this.webWindow && !this.webWindow.isDestroyed()) return this.webWindow;
-    this.webWindow = new electron.BrowserWindow({
-      show: false,
+  getAutomationLogs() {
+    return listAutomationLogs();
+  }
+  clearAutomationLogs() {
+    this.automationLogs = [];
+    clearAutomationLogs();
+    this.broadcastAutomationLogs();
+  }
+  resetAutomationRuntime() {
+    resetAutomationRuntime();
+    this.automationKnownStates = {};
+    this.automationPrimed = false;
+    this.lastAutomationDiagnostic = "";
+  }
+  setInstagramAutomation(enabled2, text, automaticReplies = []) {
+    this.automationEnabled = Boolean(enabled2);
+    this.automationText = text.trim();
+    this.automaticReplies = automaticReplies.filter((reply) => reply.message.trim()).map((reply) => ({ message: reply.message.trim(), start: reply.start, end: reply.end }));
+    setAppSetting("automation-enabled", String(this.automationEnabled));
+    setAppSetting("automation-text", this.automationText);
+    setAppSetting("automatic-replies", JSON.stringify(this.automaticReplies));
+    this.automationPrimed = false;
+    this.automationKnownStates = {};
+    writeAutomationDebug("config", { enabled: this.automationEnabled, hasText: Boolean(this.automationText), automaticReplies: this.automaticReplies.length });
+    this.syncAutomationState();
+  }
+  setGlobalAutomation(enabled2) {
+    this.automationGlobalEnabled = Boolean(enabled2);
+    setAppSetting("automation-global-enabled", String(this.automationGlobalEnabled));
+    this.automationPrimed = false;
+    this.automationKnownStates = {};
+    this.automationAllowProcessedOnce = this.automationGlobalEnabled;
+    writeAutomationDebug("global-toggle", { enabled: this.automationGlobalEnabled });
+    this.syncAutomationState();
+  }
+  refreshAutomationStatus() {
+    this.syncAutomationState();
+  }
+  syncAutomationState() {
+    const active = this.automationGlobalEnabled && this.hasConfiguredAutomation();
+    if (active && !this.automationTimer) {
+      this.automationTimer = setInterval(() => void this.runInstagramAutomation(), 2e3);
+      void this.runInstagramAutomation();
+    } else if (!active && this.automationTimer) {
+      clearInterval(this.automationTimer);
+      this.automationTimer = null;
+    }
+    this.sendAutomationStatus(false);
+  }
+  hasConfiguredAutomation() {
+    return this.automationEnabled && (Boolean(this.automationText) || this.automaticReplies.length > 0) || listAutomationFlows().some((flow) => flow.enabled);
+  }
+  navigateInstagram(section) {
+    if (!this.instagram || this.instagram.webContents.isDestroyed()) return;
+    void this.instagram.webContents.loadURL(INSTAGRAM_ROUTES[section]);
+    this.scheduleUnreadPoll(800);
+  }
+  createView(url) {
+    const view = new electron.WebContentsView({
       webPreferences: {
         nodeIntegration: false,
-        contextIsolation: true
+        contextIsolation: true,
+        backgroundThrottling: false
       }
     });
-    this.webWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
-      handleRenderError({ kind: "instagram-window-load-failed", errorCode, errorDescription, url: validatedURL, isMainFrame });
+    view.webContents.setWindowOpenHandler(({ url: target }) => {
+      electron.shell.openExternal(target);
+      return { action: "deny" };
     });
-    this.webWindow.webContents.on("render-process-gone", (_event, details) => {
-      handleRenderError({ kind: "instagram-window-process-gone", reason: details.reason, exitCode: details.exitCode });
+    view.webContents.on("before-input-event", (event, input) => {
+      if (input.type === "keyDown" && input.control && input.shift && input.key.toLowerCase() === "i") {
+        event.preventDefault();
+        if (view.webContents.isDevToolsOpened()) view.webContents.closeDevTools();
+        else view.webContents.openDevTools({ mode: "detach" });
+      }
     });
-    const devtools = this.webWindow.webContents.debugger;
-    try {
-      devtools.attach("1.3");
-      devtools.on("message", (_event, method, params) => {
-        if (method === "Network.webSocketCreated" && params.url?.includes("instagram.com")) {
-          this.realtimeSocketIds.add(params.requestId);
-          debug.log("[IG] realtime socket connected:", params.url);
-        }
-        if (method === "Network.webSocketClosed") {
-          this.realtimeSocketIds.delete(params.requestId);
-        }
-        if (method === "Network.webSocketFrameReceived" && this.realtimeSocketIds.has(params.requestId)) {
-          this.handleRealtimeFrame(params.response?.payloadData, params.response?.opcode);
-        }
-      });
-      await devtools.sendCommand("Network.enable");
-      this.realtimeAttached = true;
-    } catch (error) {
-      debug.log("[IG] realtime monitor unavailable:", error?.message || error);
+    if (url.includes("web.whatsapp.com")) view.webContents.setUserAgent(CHROME_USER_AGENT);
+    this.applyAudioVolume(view);
+    if (url.includes("instagram.com")) {
+      view.webContents.on("did-finish-load", () => this.scheduleUnreadPoll(600));
+      view.webContents.on("did-navigate-in-page", () => this.scheduleUnreadPoll(400));
     }
-    for (const [name, value] of Object.entries({
-      ...this.cookies?.extra,
-      sessionid: this.cookies?.sessionid,
-      csrftoken: this.cookies?.csrftoken,
-      ds_user_id: this.cookies?.ds_user_id
-    })) {
-      if (!value) continue;
-      await this.webWindow.webContents.session.cookies.set({ url: BASE, name, value: String(value) }).catch(() => {
-      });
-    }
-    await this.webWindow.loadURL(`${BASE}/direct/inbox/`);
-    return this.webWindow;
+    view.webContents.setZoomFactor(this.zoomPercent / 100);
+    void view.webContents.loadURL(url);
+    return view;
   }
-  handleRealtimeFrame(payload, opcode) {
-    if (!payload) return;
-    let parsed;
+  createInstagramHeader() {
+    const header = new electron.WebContentsView({
+      webPreferences: {
+        preload: path.join(__dirname, "../preload/index.js"),
+        nodeIntegration: false,
+        contextIsolation: true,
+        backgroundThrottling: false
+      }
+    });
+    header.webContents.on("did-finish-load", () => {
+      header.webContents.send("instagram:counts", this.instagramCounts);
+    });
+    if (process.env.ELECTRON_RENDERER_URL) {
+      void header.webContents.loadURL(`${process.env.ELECTRON_RENDERER_URL}?instagram-header=1`);
+    } else {
+      void header.webContents.loadFile(path.join(__dirname, "../renderer/index.html"), { query: { "instagram-header": "1" } });
+    }
+    return header;
+  }
+  createInstagramProbe() {
+    return new electron.WebContentsView({
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+        backgroundThrottling: false
+      }
+    });
+  }
+  async getInstagramAutomationProbe() {
+    this.instagramAutomationProbe ??= this.createInstagramProbe();
+    if (this.window && !this.window.isDestroyed()) {
+      try {
+        this.window.contentView.addChildView(this.instagramAutomationProbe);
+        this.instagramAutomationProbe.setBounds({ x: -1600, y: -900, width: 1200, height: 800 });
+      } catch {
+      }
+    }
+    const webContents = this.instagramAutomationProbe.webContents;
+    if (webContents.getURL() !== INSTAGRAM_ROUTES.inbox) {
+      try {
+        writeAutomationDebug("probe-load", { url: INSTAGRAM_ROUTES.inbox });
+        await webContents.loadURL(INSTAGRAM_ROUTES.inbox);
+        await this.waitForAutomationInbox(webContents);
+      } catch {
+        return null;
+      }
+    }
+    return this.instagramAutomationProbe;
+  }
+  async waitForAutomationInbox(webContents) {
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const ready = await webContents.executeJavaScript(`document.querySelectorAll('[role="button"] img[alt="user-profile-picture"]').length > 0`, true).catch(() => false);
+      if (ready) return;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  async show() {
+    if (!this.window || this.window.isDestroyed()) return;
+    this.instagram ??= this.createView("https://www.instagram.com/direct/inbox/");
+    this.instagramHeader ??= this.createInstagramHeader();
+    this.instagramProbe ??= this.createInstagramProbe();
+    this.applyAudioVolume(this.instagram);
+    this.whatsapp ??= this.createView("https://web.whatsapp.com/");
+    this.applyAudioVolume(this.whatsapp);
+    this.window.contentView.addChildView(this.instagramHeader);
+    this.window.contentView.addChildView(this.instagram);
+    this.window.contentView.addChildView(this.whatsapp);
+    this.visible = true;
+    this.setViewMode(this.viewMode);
+    this.resize();
+    this.startUnreadPolling();
+  }
+  hide() {
+    if (!this.window || this.window.isDestroyed()) return;
+    if (this.instagram) this.window.contentView.removeChildView(this.instagram);
+    if (this.instagramHeader) this.window.contentView.removeChildView(this.instagramHeader);
+    if (this.whatsapp) this.window.contentView.removeChildView(this.whatsapp);
+    this.visible = false;
+    this.stopUnreadPolling();
+    if (this.automationTimer) clearInterval(this.automationTimer);
+    this.automationTimer = null;
+    this.updateTaskbarBadge(0);
+  }
+  startUnreadPolling() {
+    if (this.unreadTimer) return;
+    void this.pollUnread();
+    this.unreadTimer = setInterval(() => void this.pollUnread(), 5e3);
+  }
+  stopUnreadPolling() {
+    if (this.unreadTimer) clearInterval(this.unreadTimer);
+    if (this.unreadRefreshTimer) clearTimeout(this.unreadRefreshTimer);
+    this.unreadTimer = null;
+    this.unreadRefreshTimer = null;
+    this.unreadPolling = false;
+  }
+  scheduleUnreadPoll(delay) {
+    if (!this.visible || this.unreadRefreshTimer) return;
+    this.unreadRefreshTimer = setTimeout(() => {
+      this.unreadRefreshTimer = null;
+      void this.pollUnread();
+    }, delay);
+  }
+  async pollUnread() {
+    if (this.unreadPolling) return;
+    this.unreadPolling = true;
     try {
-      parsed = JSON.parse(payload.replace(/^for\s*\(;;\);/, ""));
+      const [instagramTotal, whatsappCount] = await Promise.all([
+        this.pollInstagramProbe(),
+        this.countUnread(this.whatsapp)
+      ]);
+      this.updateTaskbarBadge(instagramTotal + whatsappCount);
+    } finally {
+      this.unreadPolling = false;
+    }
+  }
+  async countUnread(view) {
+    if (!view || view.webContents.isDestroyed() || !view.webContents.getURL()) return 0;
+    try {
+      return Number(await view.webContents.executeJavaScript(UNREAD_SCRIPT, true)) || 0;
     } catch {
-      debug.log("[IG] realtime frame:", { opcode, size: payload.length, format: "binary-or-non-json" });
+      return 0;
+    }
+  }
+  async runInstagramAutomation() {
+    if (this.automationBusy || !this.automationGlobalEnabled || !this.hasConfiguredAutomation()) return;
+    this.automationBusy = true;
+    this.sendAutomationStatus(true);
+    writeAutomationDebug("cycle-start");
+    try {
+      const automationProbe = await this.getInstagramAutomationProbe();
+      if (!automationProbe || automationProbe.webContents.isDestroyed()) return;
+      await automationProbe.webContents.executeJavaScript(`(() => {
+        const notification = document.querySelector('[aria-label*="nova notificação" i], [aria-label*="new notification" i]')
+        const inboxLink = document.querySelector('a[href="/direct/inbox/"]')
+        if (notification && inboxLink) inboxLink.click()
+      })()`, true).catch(() => {
+      });
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      const flows = listAutomationFlows().filter((flow) => flow.enabled).map((flow) => {
+        try {
+          const definition = JSON.parse(flow.definition);
+          const fallbackNode = definition.nodes?.find((node) => node.id === definition.fallbackNodeId) || definition.nodes?.find((node) => node.type === "fallback");
+          return {
+            id: flow.id,
+            keywords: (definition.trigger?.keywords || []).map((keyword) => keyword.toLocaleLowerCase()).filter(Boolean),
+            response: definition.actions?.find((action) => action.type === "reply")?.text?.trim() || "",
+            fallbackResponse: fallbackNode?.text?.trim() || ""
+          };
+        } catch {
+          return { id: flow.id, keywords: [], response: "", fallbackResponse: "" };
+        }
+      }).filter((flow) => flow.keywords.length > 0 && flow.response || flow.fallbackResponse);
+      const processedMessageIds = listProcessedMessageIds("instagram");
+      const result = await automationProbe.webContents.executeJavaScript(createInstagramAutoReplyScript(this.automationText, !this.automationPrimed, this.automationAllowProcessedOnce, flows, processedMessageIds, this.automationKnownStates, this.automaticReplies), true);
+      this.automationKnownStates = result.states || this.automationKnownStates;
+      this.automationPrimed = true;
+      this.automationAllowProcessedOnce = false;
+      writeAutomationDebug("cycle-result", {
+        status: result.status,
+        diagnostic: result.diagnostic,
+        conversation: result.conversation || null,
+        flowId: result.flowId || null
+      });
+      if (result.status === "idle" && result.diagnostic) {
+        const diagnostic = `${result.diagnostic.url || "sem URL"}|${result.diagnostic.rows || 0}|${result.diagnostic.markers || 0}|${result.diagnostic.skippedState || 0}|${result.diagnostic.skippedProcessed || 0}|${result.diagnostic.skippedReply || 0}`;
+        if (diagnostic !== this.lastAutomationDiagnostic) {
+          this.lastAutomationDiagnostic = diagnostic;
+          this.addAutomationLog({
+            conversation: "Monitor do Instagram",
+            action: "reply",
+            status: "failed",
+            detail: `Nenhuma resposta: ${result.diagnostic.rows || 0} conversas, ${result.diagnostic.markers || 0} não lidas, ${result.diagnostic.eligible || 0} elegíveis, ${result.diagnostic.skippedState || 0} estado, ${result.diagnostic.skippedProcessed || 0} processadas, ${result.diagnostic.skippedReply || 0} sem resposta`
+          });
+        }
+      }
+      if (result?.status === "sent") {
+        if (result.conversationId && result.ownState) this.automationKnownStates[result.conversationId] = result.ownState;
+        if (result.messageId) markProcessedMessage("instagram", result.messageId);
+        if (result.conversationId) {
+          upsertConversationState({
+            platform: "instagram",
+            conversationId: result.conversationId,
+            flowId: result.flowId,
+            currentState: "awaiting_reply"
+          });
+        }
+        this.addAutomationLog({
+          conversation: result.conversation || "Conversa sem nome",
+          action: "reply",
+          status: "sent",
+          detail: "Resposta automática enviada"
+        });
+      }
+    } catch {
+      writeAutomationDebug("cycle-error");
+      this.addAutomationLog({
+        conversation: "Instagram",
+        action: "reply",
+        status: "failed",
+        detail: "Falha ao executar a automação"
+      });
+    } finally {
+      this.automationBusy = false;
+      this.sendAutomationStatus(false);
+    }
+  }
+  addAutomationLog(log) {
+    this.automationLogs.unshift({
+      ...log,
+      id: crypto.randomUUID(),
+      at: (/* @__PURE__ */ new Date()).toISOString(),
+      platform: "instagram"
+    });
+    if (this.automationLogs.length > 200) this.automationLogs.length = 200;
+    insertAutomationLog(this.automationLogs[0]);
+    this.broadcastAutomationLogs();
+  }
+  broadcastAutomationLogs() {
+    electron.BrowserWindow.getAllWindows().forEach((window) => {
+      if (!window.isDestroyed()) window.webContents.send("app:automation-logs", this.automationLogs);
+    });
+  }
+  sendAutomationStatus(running) {
+    if (!this.window || this.window.isDestroyed()) return;
+    this.window.webContents.send("app:automation-status", {
+      enabled: this.automationGlobalEnabled && this.hasConfiguredAutomation(),
+      globalEnabled: this.automationGlobalEnabled,
+      configured: this.hasConfiguredAutomation(),
+      running
+    });
+  }
+  async pollInstagramProbe() {
+    if (this.instagramProbeBusy || !this.instagramProbe || this.instagramProbe.webContents.isDestroyed()) {
+      return this.instagramCounts.inbox + this.instagramCounts.requests + this.instagramCounts.hidden;
+    }
+    this.instagramProbeBusy = true;
+    try {
+      const visibleUrl = this.instagram?.webContents.getURL() || "";
+      const visibleSection = visibleUrl.includes("/direct/requests/hidden") ? "hidden" : visibleUrl.includes("/direct/requests") ? "requests" : visibleUrl.includes("/direct/") ? "inbox" : null;
+      const inbox = visibleSection === "inbox" ? await this.countUnread(this.instagram) : await this.loadProbeRoute(INSTAGRAM_ROUTES.inbox) ? await this.countUnread(this.instagramProbe) : this.instagramCounts.inbox;
+      const requests = visibleSection === "requests" ? await this.readRequestCount(this.instagram, "requests") : await this.loadProbeRoute(INSTAGRAM_ROUTES.requests) ? await this.readRequestCount(this.instagramProbe, "requests") : this.instagramCounts.requests;
+      const hidden = visibleSection === "hidden" ? await this.readRequestCount(this.instagram, "hidden") : await this.loadProbeRoute(INSTAGRAM_ROUTES.hidden) ? await this.readRequestCount(this.instagramProbe, "hidden") : this.instagramCounts.hidden;
+      this.instagramCounts = { inbox, requests, hidden };
+      if (this.instagramHeader && !this.instagramHeader.webContents.isDestroyed()) {
+        this.instagramHeader.webContents.send("instagram:counts", this.instagramCounts);
+      }
+      return inbox + requests + hidden;
+    } finally {
+      this.instagramProbeBusy = false;
+    }
+  }
+  async loadProbeRoute(url) {
+    if (!this.instagramProbe || this.instagramProbe.webContents.isDestroyed()) return false;
+    try {
+      if (this.instagramProbe.webContents.getURL() !== url) await this.instagramProbe.webContents.loadURL(url);
+      await new Promise((resolve) => setTimeout(resolve, 600));
+      await this.instagramProbe.webContents.executeJavaScript(PREPARE_PROBE_SCRIPT, true);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async readRequestCount(view, section) {
+    if (!view || view.webContents.isDestroyed()) return 0;
+    try {
+      const result = await view.webContents.executeJavaScript(INSTAGRAM_REQUESTS_SCRIPT, true);
+      const labeledCount = Number(result?.[section]) || 0;
+      const blueDotCount = await this.countUnread(view);
+      return Math.max(labeledCount, blueDotCount, Number(result?.rows) || 0);
+    } catch {
+      return 0;
+    }
+  }
+  updateTaskbarBadge(count) {
+    if (count === this.unreadCount) return;
+    this.unreadCount = count;
+    electron.app.setBadgeCount(count);
+    if (this.window && !this.window.isDestroyed()) {
+      this.window.webContents.send("app:unread-count", count);
+    }
+    if (!this.window || this.window.isDestroyed() || process.platform !== "win32") return;
+    if (count === 0) {
+      this.window.setOverlayIcon(null, "");
       return;
     }
-    const candidates = [];
-    const visit = (value) => {
-      if (!value || typeof value !== "object") return;
-      if ((value.item_id || value.id) && (value.thread_id || value.threadId) && (value.timestamp || value.created_at)) {
-        candidates.push(value);
-      }
-      if (Array.isArray(value)) {
-        for (const item of value) visit(item);
-      } else {
-        for (const child of Object.values(value)) visit(child);
-      }
-    };
-    visit(parsed);
-    debug.log("[IG] realtime frame:", { opcode, size: payload.length, candidates: candidates.length });
-    for (const item of candidates) {
-      const threadId = item.thread_id || item.threadId;
-      const message = this.normalizeDirectItem(item, String(threadId));
-      if (!message.id || this.realtimeSeenMessageIds.has(String(message.id))) continue;
-      this.realtimeSeenMessageIds.add(String(message.id));
-      if (this.realtimeSeenMessageIds.size > 5e3) {
-        const oldest = this.realtimeSeenMessageIds.values().next().value;
-        if (oldest) this.realtimeSeenMessageIds.delete(oldest);
-      }
-      this.emit("message", message);
+    const label = count > 99 ? "99+" : String(count);
+    this.window.setOverlayIcon(electron.nativeImage.createFromBuffer(createTaskbarBadge(count)), `${label} conversas não lidas`);
+  }
+  resize() {
+    if (!this.visible || !this.window) return;
+    const { width, height } = this.window.getContentBounds();
+    const contentWidth = Math.max(0, width - this.sidebarWidth);
+    const contentHeight = Math.max(0, height - OFFICIAL_VIEWS_HEADER_HEIGHT);
+    const instagramHeaderHeight = 44;
+    const instagramBounds = { y: OFFICIAL_VIEWS_HEADER_HEIGHT + instagramHeaderHeight, height: Math.max(0, contentHeight - instagramHeaderHeight) };
+    const standardBounds = { y: OFFICIAL_VIEWS_HEADER_HEIGHT, height: contentHeight };
+    if (this.viewMode === "instagram" && this.instagram) {
+      this.instagramHeader?.setBounds({ x: this.sidebarWidth, y: OFFICIAL_VIEWS_HEADER_HEIGHT, width: contentWidth, height: instagramHeaderHeight });
+      this.instagram.setBounds({ ...instagramBounds, x: this.sidebarWidth, width: contentWidth });
+      return;
     }
-  }
-  async igFetch(path2, options = {}) {
-    const url = path2.startsWith("http") ? path2 : `${API}${path2}`;
-    const requestBase = url.startsWith(MOBILE_BASE) ? MOBILE_BASE : BASE;
-    debug.log("[IG] fetch", options.method || "GET", url);
-    const headers = {
-      "User-Agent": USER_AGENT,
-      "Accept": "*/*",
-      "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
-      "X-IG-App-ID": IG_APP_ID,
-      "X-CSRFToken": this.cookies?.csrftoken ?? "",
-      "Cookie": this.cookieString(),
-      "Origin": requestBase,
-      "Referer": `${requestBase}/`,
-      "Sec-Fetch-Site": "cross-site",
-      "Sec-Fetch-Mode": "cors",
-      "Sec-Fetch-Dest": "empty",
-      "Accept-Encoding": "gzip, deflate, br"
-    };
-    if (options.body && !(options.body instanceof URLSearchParams)) {
-      headers["Content-Type"] = "application/x-www-form-urlencoded";
+    if (this.viewMode === "whatsapp" && this.whatsapp) {
+      this.whatsapp.setBounds({ ...standardBounds, x: this.sidebarWidth, width: contentWidth });
+      return;
     }
-    let res;
-    try {
-      res = await fetch(url, { ...options, headers: { ...headers, ...options.headers }, redirect: "follow" });
-    } catch (error) {
-      handleNetworkError({ kind: "request-failed", method: options.method || "GET", url, message: error?.message || String(error) });
-      throw new Error(`Falha de rede ao acessar o Instagram: ${error?.message || "conexão recusada"}`);
-    }
-    debug.log("[IG] response", res.status, res.statusText);
-    if (!res.ok) {
-      const text = await res.text();
-      const contentType = res.headers.get("content-type") || "desconhecido";
-      handleNetworkError({
-        kind: "http-error",
-        method: options.method || "GET",
-        url,
-        status: res.status,
-        statusText: res.statusText,
-        contentType,
-        body: summarizeResponseBody(text, contentType)
-      });
-      throw new Error(`Instagram API ${res.status} ${res.statusText || "erro HTTP"}`);
-    }
-    try {
-      return await res.json();
-    } catch (error) {
-      const contentType = res.headers.get("content-type") || "desconhecido";
-      handleNetworkError({
-        kind: "invalid-response",
-        method: options.method || "GET",
-        url,
-        status: res.status,
-        contentType,
-        message: error?.message || "resposta não é JSON"
-      });
-      throw new Error("O Instagram retornou uma resposta inválida (não-JSON)");
-    }
-  }
-  async loginWithBrowser() {
-    return new Promise((resolve, reject) => {
-      const win = new electron.BrowserWindow({
-        width: 480,
-        height: 800,
-        resizable: false,
-        title: "Login Instagram",
-        webPreferences: {
-          nodeIntegration: false,
-          contextIsolation: true
-        }
-      });
-      win.loadURL(`${BASE}/accounts/login/`);
-      const checkDone = async (url) => {
-        if (url.includes("/direct/inbox/") || url === `${BASE}/` || url === BASE) {
-          await new Promise((r) => setTimeout(r, 1500));
-          const allCookies = await win.webContents.session.cookies.get({ url: BASE });
-          const sid = allCookies.find((c) => c.name === "sessionid");
-          const csrf = allCookies.find((c) => c.name === "csrftoken");
-          const uid = allCookies.find((c) => c.name === "ds_user_id");
-          if (sid?.value && csrf?.value && uid?.value) {
-            const coreCookies = /* @__PURE__ */ new Set(["sessionid", "csrftoken", "ds_user_id"]);
-            this.cookies = {
-              sessionid: sid.value,
-              csrftoken: csrf.value,
-              ds_user_id: uid.value,
-              extra: Object.fromEntries(
-                allCookies.filter((cookie) => !coreCookies.has(cookie.name)).map((cookie) => [cookie.name, cookie.value])
-              )
-            };
-            storeSet("instagram", "cookies", JSON.stringify(this.cookies));
-            win.close();
-            this.status = "connected";
-            this.emit("connected");
-            this.startPolling();
-            resolve();
-          } else if (!url.includes("/accounts/")) {
-            win.close();
-            reject(new Error("Não foi possível obter os cookies de sessão"));
-          }
-        }
-      };
-      win.webContents.on("did-navigate", (_e, url) => checkDone(url));
-      win.on("closed", () => {
-        if (!this.cookies) reject(new Error("Janela de login fechada sem concluir"));
-      });
-    });
-  }
-  async restoreSession() {
-    if (this.status === "connected") return true;
-    const raw = storeGet("instagram", "cookies");
-    if (!raw) return false;
-    try {
-      this.cookies = JSON.parse(raw);
-      await this.igFetch("/direct_v2/inbox/?persistentBadging=true&limit=1");
-      this.status = "connected";
-      this.emit("connected");
-      this.startPolling();
-      return true;
-    } catch (e) {
-      if (e?.message?.startsWith("Instagram API 401") || e?.message?.startsWith("Instagram API 403")) {
-        console.log("[IG] sessão inválida, limpando cookies");
-        this.cookies = null;
-        storeDelete("instagram", "cookies");
-      } else {
-        console.log("[IG] restore erro de rede/outro, mantendo cookies:", e?.message || e);
-      }
-    }
-    this.cookies = null;
-    return false;
-  }
-  async tryRestore() {
-    await this.restoreSession();
-  }
-  async logout() {
-    this.stopPolling();
-    if (this.webWindow && !this.webWindow.isDestroyed()) this.webWindow.close();
-    this.webWindow = null;
-    this.realtimeSocketIds.clear();
-    this.realtimeSeenMessageIds.clear();
-    this.realtimeAttached = false;
-    this.cookies = null;
-    this.status = "disconnected";
-    this.threads = [];
-    instagramClearThreads();
-    storeDelete("instagram", "cookies");
-    this.emit("disconnected");
-  }
-  normalizeDirectItem(item, threadId) {
-    const media = item.visual_media?.media || item.media_share?.media || item.reel_share?.media || item.clip?.clip || item.media;
-    const videoUrl = media?.video_versions?.[0]?.url;
-    const imageUrl = media?.image_versions2?.candidates?.[0]?.url;
-    const audioUrl = item.voice_media?.media?.audio_src || item.audio_media?.audio_src || item.audio_media?.media?.audio_src;
-    const mediaUrl = videoUrl || imageUrl || audioUrl || "";
-    const mediaType = videoUrl ? media?.is_dash_eligible ? "video" : "video" : imageUrl ? "image" : audioUrl ? "audio" : "";
-    return {
-      id: item.item_id || item.id,
-      threadId,
-      text: item.text || item.caption?.text || "",
-      senderId: item.user_id?.toString(),
-      timestamp: item.timestamp,
-      isMine: item.user_id?.toString() === this.cookies?.ds_user_id,
-      mediaUrl,
-      mediaType,
-      thumbnailUrl: imageUrl || media?.image_versions2?.candidates?.[0]?.url || ""
-    };
-  }
-  async getMessages(threadId) {
-    const page = await this.getMessagesPage(threadId);
-    return page.messages;
-  }
-  async getMessagesPage(threadId, cursor) {
-    const suffix = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
-    const data = await this.igFetch(`/direct_v2/threads/${threadId}/${suffix}`);
-    const thread = data.thread || data;
-    const messages = (thread.items || []).map((item) => this.normalizeDirectItem(item, threadId)).reverse();
-    const nextCursor = thread.oldest_cursor || thread.next_cursor || data.oldest_cursor || null;
-    return {
-      messages,
-      nextCursor,
-      hasMore: Boolean(nextCursor && nextCursor !== cursor && (thread.has_older !== false && thread.has_older_items !== false))
-    };
-  }
-  async getThreadsPage(folder = "main", cursor) {
-    const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
-    const endpoint = folder === "pending" ? `${MOBILE_API}/direct_v2/pending_inbox/` : folder === "hidden" ? `${MOBILE_API}/direct_v2/hidden_inbox/` : "/direct_v2/inbox/";
-    const data = await this.igFetch(`${endpoint}?persistentBadging=true&limit=20${suffix}`);
-    const inbox = folder === "pending" ? data.pending_inbox || data.pendingInbox || data.inbox || data : folder === "hidden" ? data.hidden_inbox || data.hiddenInbox || data.inbox || data : data.inbox || data;
-    debug.log("[IG] folder response:", {
-      folder,
-      keys: Object.keys(data || {}),
-      inboxKeys: Object.keys(inbox || {}),
-      threads: inbox?.threads?.length || 0
-    });
-    const threads = (inbox.threads || []).map((t) => ({
-      id: t.thread_id || t.threadId || t.id,
-      graphqlId: t.thread_v2_id || t.thread_igid || t.thread_pk || t.pk || t.thread_id || t.id,
-      name: t.thread_title || t.users?.map((u) => u.username).join(", ") || "Unknown",
-      lastMessage: t.last_permanent_item?.text || t.last_item?.text || "",
-      lastTimestamp: t.last_activity_at || t.last_item?.timestamp,
-      unread: t.has_newer,
-      avatarUrl: t.users?.[0]?.profile_pic_url || "",
-      folder
-    }));
-    if (cursor) instagramUpsertThreads(folder, threads);
-    else instagramReplaceThreads(folder, threads);
-    const nextCursor = inbox.oldest_cursor || inbox.next_cursor || data.oldest_cursor || null;
-    return {
-      threads,
-      nextCursor,
-      hasMore: Boolean(nextCursor && nextCursor !== cursor && (inbox.has_older_threads !== false && inbox.has_older !== false))
-    };
-  }
-  async searchThreads(query) {
-    const offsets = encodeURIComponent('{"message_content":0}');
-    const resultTypes = encodeURIComponent('["message_content"]');
-    const data = await this.igFetch(`/direct_v2/search_secondary/?offsets=${offsets}&query=${encodeURIComponent(query)}&result_types=${resultTypes}`);
-    const results = data.message_content || data.results || data.items || [];
-    return results.map((result) => {
-      const thread = result.thread || result.thread_info || result;
-      const item = result.item || result.message || result.last_item || result;
-      const users = thread.users || result.users || [];
-      return {
-        id: thread.thread_id || thread.threadId || thread.id || result.thread_id,
-        graphqlId: thread.thread_v2_id || thread.thread_igid || thread.thread_pk || thread.pk || thread.thread_id,
-        name: thread.thread_title || users.map((user) => user.username).join(", ") || result.thread_title || "Unknown",
-        lastMessage: item.text || result.text || "",
-        lastTimestamp: item.timestamp || result.timestamp,
-        unread: thread.has_newer,
-        avatarUrl: users[0]?.profile_pic_url || ""
-      };
-    }).filter((thread) => thread.id);
-  }
-  async sendMessage(threadId, text) {
-    const window = await this.getWebWindow();
-    let result;
-    try {
-      result = await window.webContents.executeJavaScript(`
-      (async () => {
-        const threadId = ${JSON.stringify(threadId)};
-        const text = ${JSON.stringify(text)};
-        const html = document.documentElement.innerHTML;
-        const lsd = html.match(/\\["LSD",\\[\\],\\{"token":"([^"]+)"/)?.[1] || '';
-        const fbDtsg = html.match(/\\["DTSGInitialData",\\[\\],\\{"token":"([^"]+)"/)?.[1] || '';
-        const jazoest = String(2 + [...lsd].reduce((sum, char) => sum + char.charCodeAt(0), 0));
-        const variables = {
-          ig_thread_igid: threadId,
-          offline_threading_id: String(Date.now()) + String(Math.floor(Math.random() * 1000000)),
-          recipient_igids: null,
-          replied_to_client_context: null,
-          replied_to_item_id: null,
-          reply_to_message_id: null,
-          sampled: null,
-          text: { sensitive_string_value: text },
-          mentions: [],
-          mentioned_user_ids: [],
-          commands: null,
-          forwarded_from_thread_id: null,
-          is_forwarded_from_own_message: null,
-          send_attribution: 'igd_web_chat_tab:in_thread'
-        };
-        const form = new URLSearchParams({
-          fb_api_caller_class: 'RelayModern',
-          fb_api_req_friendly_name: 'IGDirectTextSendMutation',
-          server_timestamps: 'true',
-          lsd,
-          fb_dtsg: fbDtsg,
-          jazoest,
-          variables: JSON.stringify(variables),
-          doc_id: '26911679871773184'
-        });
-        const csrf = document.cookie.match(/(?:^|; )csrftoken=([^;]+)/)?.[1] || '';
-        const response = await fetch('/api/graphql', {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'X-CSRFToken': decodeURIComponent(csrf),
-            'X-FB-Friendly-Name': 'IGDirectTextSendMutation',
-            'X-FB-LSD': lsd,
-            'X-IG-App-ID': '936619743392459',
-            'X-ASBD-ID': '359341'
-          },
-          body: form
-        });
-        return { status: response.status, body: await response.text() };
-      })()
-      `, true);
-    } catch (error) {
-      handleRenderError({ kind: "instagram-send-render-failed", message: error?.message || String(error) });
-      throw new Error(`Falha no renderer do Instagram: ${error?.message || "não foi possível executar o envio"}`);
-    }
-    const { status, body } = result;
-    debug.log("[IG] sendMessage response:", status);
-    if (status < 200 || status >= 300) {
-      handleNetworkError({
-        kind: "send-http-error",
-        method: "POST",
-        url: `${BASE}/api/graphql`,
-        status,
-        body: summarizeResponseBody(body, "text/plain")
-      });
-      throw new Error(`Instagram API ${status} ao enviar mensagem`);
-    }
-    try {
-      const data = JSON.parse(body);
-      if (data.errors?.length || !data.data?.xig_direct_text_send_with_slide_messaging_response) {
-        throw new Error(`Instagram API 400: ${body}`);
-      }
-    } catch (e) {
-      handleNetworkError({ kind: "send-invalid-response", message: e?.message || String(e) });
-      throw e;
-    }
-  }
-  async startPolling() {
-    this.stopPolling();
-    await this.loadThreads();
-    this.getWebWindow().catch((error) => debug.log("[IG] realtime startup failed:", error?.message || error));
-    this.pollTimer = setInterval(() => this.loadThreads(), 15e3);
-  }
-  stopPolling() {
-    if (this.pollTimer) {
-      clearInterval(this.pollTimer);
-      this.pollTimer = null;
-    }
-  }
-  async loadThreads() {
-    if (!this.cookies) return;
-    try {
-      const page = await this.getThreadsPage("main");
-      this.threads = page.threads;
-      console.log("[IG] threads count:", this.threads.length);
-      this.emit("threadsUpdated", this.threads);
-    } catch (e) {
-      debug.log("[IG] erro loadThreads:", e);
-    }
+    if (!this.instagram || !this.whatsapp) return;
+    const panelWidth = Math.floor(contentWidth / 2);
+    this.instagramHeader?.setBounds({ x: this.sidebarWidth, y: OFFICIAL_VIEWS_HEADER_HEIGHT, width: panelWidth, height: instagramHeaderHeight });
+    this.instagram.setBounds({ ...instagramBounds, x: this.sidebarWidth, width: panelWidth });
+    this.whatsapp.setBounds({ ...standardBounds, x: this.sidebarWidth + panelWidth, width: contentWidth - panelWidth });
   }
 }
-const instagramService = new InstagramService();
+const officialViews = new OfficialViews();
+const dialogWindows = /* @__PURE__ */ new Set();
 function broadcast(event, ...args) {
   electron.BrowserWindow.getAllWindows().forEach((w) => w.webContents.send(event, ...args));
 }
@@ -1504,67 +1197,86 @@ function handle(channel, fn) {
   });
 }
 function registerIpcHandlers() {
-  whatsappService.on("connecting", () => broadcast("whatsapp:connecting"));
-  whatsappService.on("qr", (qr) => broadcast("whatsapp:qr", qr));
-  whatsappService.on("connected", () => broadcast("whatsapp:connected"));
-  whatsappService.on("disconnected", (reason) => broadcast("whatsapp:disconnected", reason));
-  whatsappService.on("error", (msg) => broadcast("whatsapp:error", msg));
-  whatsappService.on("message", (msg) => broadcast("whatsapp:message", msg));
-  whatsappService.on("chatsUpdated", (chats) => broadcast("whatsapp:chatsUpdated", chats));
-  whatsappService.on("messagesUpdated", (chatIds) => broadcast("whatsapp:messagesUpdated", chatIds));
-  whatsappService.on("historySync", (syncing) => broadcast("whatsapp:historySync", syncing));
-  handle("whatsapp:getStatus", () => whatsappService.getStatus());
-  handle("whatsapp:getQRCode", () => whatsappService.getQRCode());
-  handle("whatsapp:getHistorySyncing", () => whatsappService.getHistorySyncing());
-  handle("whatsapp:connect", () => whatsappService.connect());
-  handle("whatsapp:disconnect", () => whatsappService.disconnect());
-  handle("whatsapp:getChats", () => whatsappService.getChats());
-  handle("whatsapp:getMessages", (chatId) => whatsappService.getMessages(chatId));
-  handle("whatsapp:getOlderMessages", (chatId, beforeId) => whatsappService.getOlderMessages(chatId, beforeId));
-  handle("whatsapp:getMedia", (chatId, messageId) => whatsappService.getMedia(chatId, messageId));
-  handle("whatsapp:sendMessage", (chatId, text) => whatsappService.sendMessage(chatId, text));
-  handle("whatsapp:sendMedia", (chatId, data, mimeType, fileName, caption) => whatsappService.sendMedia(chatId, data, mimeType, fileName, caption));
-  handle("whatsapp:getProfilePicture", (jid) => whatsappService.getProfilePicture(jid));
-  handle("whatsapp:clearCreds", () => whatsappService.clearCreds());
-  handle("whatsapp:clearDatabase", () => whatsappService.clearDatabase());
-  instagramService.on("connected", () => broadcast("instagram:connected"));
-  instagramService.on("disconnected", () => broadcast("instagram:disconnected"));
-  instagramService.on("message", (msg) => broadcast("instagram:message", msg));
-  instagramService.on("threadsUpdated", (threads) => broadcast("instagram:threadsUpdated", threads));
-  handle("instagram:getStatus", () => instagramService.getStatus());
-  handle("instagram:loginWithBrowser", () => instagramService.loginWithBrowser());
-  handle("instagram:tryRestore", () => instagramService.tryRestore());
-  handle("instagram:logout", () => instagramService.logout());
-  handle("instagram:getThreads", () => instagramService.getThreads());
-  handle("instagram:getCachedThreads", (folder) => instagramService.getCachedThreads(folder || "main"));
-  handle("instagram:getMessages", (threadId) => instagramService.getMessages(threadId));
-  handle("instagram:getMessagesPage", (threadId, cursor) => instagramService.getMessagesPage(threadId, cursor));
-  handle("instagram:getThreadsPage", (folder, cursor) => instagramService.getThreadsPage(folder || "main", cursor));
-  handle("instagram:searchThreads", (query) => instagramService.searchThreads(query));
-  handle("instagram:sendMessage", (threadId, text) => instagramService.sendMessage(threadId, text));
   handle("app:reload", () => {
-    electron.BrowserWindow.getAllWindows().forEach((w) => w.webContents.reloadIgnoringCache());
+    officialViews.reload();
   });
-  handle("app:clearTokens", async () => {
-    try {
-      await whatsappService.disconnect();
-      await whatsappService.clearCreds();
-    } catch (e) {
-      debug.log("[IPC] erro disconnect:", e);
+  handle("app:setSidebarWidth", (width) => officialViews.setSidebarWidth(width));
+  handle("app:setZoom", (percent) => officialViews.setZoom(percent));
+  handle("app:setAudioVolume", (volume) => officialViews.setAudioVolume(volume));
+  handle("app:getAudioVolume", () => officialViews.getAudioVolume());
+  handle("app:setViewMode", (mode) => officialViews.setViewMode(mode));
+  handle("app:navigateInstagram", (section) => officialViews.navigateInstagram(section));
+  handle("app:getUnreadCount", () => officialViews.getUnreadCount());
+  handle("app:getInstagramCounts", () => officialViews.getInstagramCounts());
+  handle("app:setInstagramAutomation", (enabled2, text, automaticReplies) => officialViews.setInstagramAutomation(enabled2, text, automaticReplies));
+  handle("app:setGlobalAutomation", (enabled2) => officialViews.setGlobalAutomation(enabled2));
+  handle("app:getAutomationStatus", () => officialViews.getAutomationStatus());
+  handle("app:getAutomationLogs", () => officialViews.getAutomationLogs());
+  handle("app:clearAutomationLogs", () => officialViews.clearAutomationLogs());
+  handle("app:resetAutomationRuntime", () => officialViews.resetAutomationRuntime());
+  handle("app:getScheduledMessages", () => listScheduledMessages());
+  handle("app:createScheduledMessage", (item) => insertScheduledMessage(item));
+  handle("app:deleteScheduledMessage", (id) => deleteScheduledMessage(id));
+  handle("app:getAutomationFlows", () => listAutomationFlows());
+  handle("app:saveAutomationFlow", (flow) => {
+    upsertAutomationFlow(flow);
+    officialViews.refreshAutomationStatus();
+  });
+  handle("app:deleteAutomationFlow", (id) => deleteAutomationFlow(id));
+  handle("app:openDialog", (type) => {
+    const existingDialog = [...dialogWindows][0];
+    if (existingDialog && !existingDialog.isDestroyed()) {
+      existingDialog.show();
+      existingDialog.focus();
+      return;
     }
-    try {
-      waClearAll();
-      instagramService.logout();
-      debug.log("[IPC] tokens limpos");
-    } catch (e) {
-      debug.log("[IPC] erro clear:", e);
+    const parent = electron.BrowserWindow.getAllWindows().find((window) => !dialogWindows.has(window));
+    if (!parent || parent.isDestroyed()) return;
+    const parentBounds = parent.getContentBounds();
+    const dialogWidth = Math.max(440, Math.round(parentBounds.width * 0.8));
+    const dialogHeight = Math.max(420, Math.round(parentBounds.height * 0.8));
+    const dialogWindow = new electron.BrowserWindow({
+      parent,
+      width: dialogWidth,
+      height: dialogHeight,
+      minWidth: 440,
+      minHeight: 420,
+      frame: false,
+      show: false,
+      resizable: true,
+      autoHideMenuBar: true,
+      webPreferences: {
+        preload: path.join(__dirname, "../preload/index.js"),
+        sandbox: false,
+        contextIsolation: true,
+        nodeIntegration: false
+      }
+    });
+    dialogWindows.add(dialogWindow);
+    dialogWindow.once("ready-to-show", () => {
+      dialogWindow?.center();
+      dialogWindow?.show();
+    });
+    dialogWindow.on("closed", () => {
+      dialogWindows.delete(dialogWindow);
+    });
+    if (process.env.ELECTRON_RENDERER_URL) {
+      void dialogWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}?dialog=${type}`);
+    } else {
+      void dialogWindow.loadFile(path.join(__dirname, "../renderer/index.html"), { query: { dialog: type } });
     }
-    electron.BrowserWindow.getAllWindows().forEach((w) => w.webContents.reloadIgnoringCache());
+  });
+  handle("app:closeDialog", () => {
+    const focusedWindow = electron.BrowserWindow.getFocusedWindow();
+    if (focusedWindow && dialogWindows.has(focusedWindow)) focusedWindow.close();
   });
   handle("debug:getEnabled", () => debug.enabled);
   debug.onToggle((enabled2) => {
     broadcast("debug:toggle", enabled2);
   });
+}
+function handleRenderError(details) {
+  debug.renderError(details);
 }
 let mainWindow = null;
 function createWindow() {
@@ -1583,6 +1295,8 @@ function createWindow() {
     }
   });
   watchDevtools(mainWindow);
+  officialViews.attach(mainWindow);
+  void officialViews.show();
   mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     handleRenderError({ kind: "load-failed", errorCode, errorDescription, url: validatedURL, isMainFrame });
   });
@@ -1613,8 +1327,6 @@ function createWindow() {
 }
 electron.app.whenReady().then(() => {
   registerIpcHandlers();
-  whatsappService.connect().catch((error) => console.error("[WA] startup error:", error));
-  instagramService.tryRestore().catch((error) => console.error("[IG] startup restore error:", error));
   createWindow();
   electron.app.on("activate", () => {
     if (electron.BrowserWindow.getAllWindows().length === 0) createWindow();

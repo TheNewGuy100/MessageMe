@@ -10,39 +10,36 @@ async function invoke<T>(channel: string, ...args: any[]): Promise<T> {
 
 contextBridge.exposeInMainWorld('electronAPI', {
   whatsapp: {
-     getStatus: () => invoke('whatsapp:getStatus'),
-     getQRCode: () => invoke('whatsapp:getQRCode'),
-     getHistorySyncing: () => invoke('whatsapp:getHistorySyncing'),
-     connect: () => invoke('whatsapp:connect'),
-     disconnect: () => invoke('whatsapp:disconnect'),
-     getChats: () => invoke('whatsapp:getChats'),
-     getMessages: (chatId: string) => invoke('whatsapp:getMessages', chatId),
-     getOlderMessages: (chatId: string, beforeId: string) => invoke('whatsapp:getOlderMessages', chatId, beforeId),
-     getMedia: (chatId: string, messageId: string) => invoke('whatsapp:getMedia', chatId, messageId),
-     sendMessage: (chatId: string, text: string) => invoke('whatsapp:sendMessage', chatId, text),
-    sendMedia: (chatId: string, data: Uint8Array, mimeType: string, fileName: string, caption?: string) =>
-       invoke('whatsapp:sendMedia', chatId, data, mimeType, fileName, caption),
-     getProfilePicture: (jid: string) => invoke('whatsapp:getProfilePicture', jid),
-     clearCreds: () => invoke('whatsapp:clearCreds'),
-     clearDatabase: () => invoke('whatsapp:clearDatabase')
-  },
-  instagram: {
-     getStatus: () => invoke('instagram:getStatus'),
-     loginWithBrowser: () => invoke('instagram:loginWithBrowser'),
-     tryRestore: () => invoke('instagram:tryRestore'),
-     logout: () => invoke('instagram:logout'),
-     getThreads: () => invoke('instagram:getThreads'),
-     getCachedThreads: (folder?: string) => invoke('instagram:getCachedThreads', folder || 'main'),
-     getMessages: (threadId: string) => invoke('instagram:getMessages', threadId),
-     getMessagesPage: (threadId: string, cursor?: string) => invoke('instagram:getMessagesPage', threadId, cursor),
-     getThreadsPage: (folder?: string, cursor?: string) => invoke('instagram:getThreadsPage', folder, cursor),
-     searchThreads: (query: string) => invoke('instagram:searchThreads', query),
-     sendMessage: (threadId: string, text: string) => invoke('instagram:sendMessage', threadId, text)
-  },
+      open: () => invoke('app:toggleOfficialViews')
+   },
+   instagram: {
+       open: () => invoke('app:toggleOfficialViews'),
+       navigate: (section: 'inbox' | 'requests' | 'hidden') => invoke('app:navigateInstagram', section)
+   },
   app: {
-     reload: () => invoke('app:reload'),
-     hardReload: () => invoke('app:hardReload'),
-     clearTokens: () => invoke('app:clearTokens')
+      reload: () => invoke('app:reload'),
+       hardReload: () => invoke('app:hardReload'),
+       setSidebarWidth: (width: number) => invoke('app:setSidebarWidth', width),
+       setZoom: (percent: number) => invoke('app:setZoom', percent),
+        setAudioVolume: (volume: number) => invoke('app:setAudioVolume', volume),
+        getAudioVolume: () => invoke<number>('app:getAudioVolume'),
+       setViewMode: (mode: 'instagram' | 'whatsapp' | 'both') => invoke('app:setViewMode', mode),
+       getUnreadCount: () => invoke<number>('app:getUnreadCount'),
+       getInstagramCounts: () => invoke<{ inbox: number; requests: number; hidden: number }>('app:getInstagramCounts'),
+        setInstagramAutomation: (enabled: boolean, text: string, automaticReplies: Array<{ message: string; start?: string; end?: string }>) => invoke('app:setInstagramAutomation', enabled, text, automaticReplies),
+       setGlobalAutomation: (enabled: boolean) => invoke('app:setGlobalAutomation', enabled),
+       getAutomationStatus: () => invoke<{ enabled: boolean; configured: boolean; globalEnabled: boolean; running: boolean }>('app:getAutomationStatus'),
+       getAutomationLogs: () => invoke<Array<{ id: string; at: string; platform: 'instagram'; conversation: string; action: 'reply'; status: 'sent' | 'failed'; detail: string }>>('app:getAutomationLogs'),
+       clearAutomationLogs: () => invoke('app:clearAutomationLogs'),
+       resetAutomationRuntime: () => invoke('app:resetAutomationRuntime'),
+       getScheduledMessages: () => invoke<Array<{ id: string; message: string; at: string; createdAt: string; platform: string; conversationId: string | null }>>('app:getScheduledMessages'),
+       createScheduledMessage: (item: { id: string; message: string; at: string; createdAt?: string; platform?: string; conversationId?: string | null }) => invoke('app:createScheduledMessage', item),
+       deleteScheduledMessage: (id: string) => invoke('app:deleteScheduledMessage', id),
+       getAutomationFlows: () => invoke<Array<{ id: string; name: string; enabled: boolean; priority: number; definition: string; createdAt: string; updatedAt: string }>>('app:getAutomationFlows'),
+       saveAutomationFlow: (flow: { id: string; name: string; enabled: boolean; priority?: number; definition: string; createdAt?: string }) => invoke('app:saveAutomationFlow', flow),
+       deleteAutomationFlow: (id: string) => invoke('app:deleteAutomationFlow', id),
+       openDialog: (type: 'automation' | 'appointments' | 'logs') => invoke('app:openDialog', type),
+      closeDialog: () => invoke('app:closeDialog')
   },
   onEvent: (channel: string, callback: (...args: any[]) => void) => {
     ipcRenderer.on(channel, (_event, ...args) => callback(...args))

@@ -9,37 +9,36 @@ declare module '*.vue' {
 interface Window {
   electronAPI: {
     whatsapp: {
-      getStatus: () => Promise<string>
-      getQRCode: () => Promise<string | null>
-      getHistorySyncing: () => Promise<boolean>
-      connect: () => Promise<void>
-      disconnect: () => Promise<void>
-      getChats: () => Promise<any[]>
-      getMessages: (chatId: string) => Promise<any[]>
-      getOlderMessages: (chatId: string, beforeId: string) => Promise<{ messages: any[]; hasMore: boolean }>
-      getMedia: (chatId: string, messageId: string) => Promise<string | null>
-      sendMessage: (chatId: string, text: string) => Promise<void>
-      getProfilePicture: (jid: string) => Promise<string | null>
-      clearCreds: () => Promise<void>
-      clearDatabase: () => Promise<void>
+       open: () => Promise<boolean>
     }
     instagram: {
-      getStatus: () => Promise<string>
-      loginWithBrowser: () => Promise<void>
-      tryRestore: () => Promise<void>
-      logout: () => Promise<void>
-      getThreads: () => Promise<any[]>
-      getCachedThreads: (folder?: string) => Promise<any[]>
-      getMessages: (threadId: string) => Promise<any[]>
-      getMessagesPage: (threadId: string, cursor?: string) => Promise<{ messages: any[]; nextCursor: string | null; hasMore: boolean }>
-      getThreadsPage: (folder?: string, cursor?: string) => Promise<{ threads: any[]; nextCursor: string | null; hasMore: boolean }>
-      searchThreads: (query: string) => Promise<any[]>
-      sendMessage: (threadId: string, text: string) => Promise<void>
+       open: () => Promise<boolean>
+       navigate: (section: 'inbox' | 'requests' | 'hidden') => Promise<void>
     }
     app: {
-      reload: () => Promise<void>
-      hardReload: () => Promise<void>
-      clearTokens: () => Promise<void>
+       reload: () => Promise<void>
+        hardReload: () => Promise<void>
+        setSidebarWidth: (width: number) => Promise<void>
+        setZoom: (percent: number) => Promise<void>
+        setAudioVolume: (volume: number) => Promise<void>
+        getAudioVolume: () => Promise<number>
+        setViewMode: (mode: 'instagram' | 'whatsapp' | 'both') => Promise<void>
+        getUnreadCount: () => Promise<number>
+        getInstagramCounts: () => Promise<{ inbox: number; requests: number; hidden: number }>
+        setInstagramAutomation: (enabled: boolean, text: string, automaticReplies: Array<{ message: string; start?: string; end?: string }>) => Promise<void>
+        setGlobalAutomation: (enabled: boolean) => Promise<void>
+        getAutomationStatus: () => Promise<{ enabled: boolean; configured: boolean; globalEnabled: boolean; running: boolean }>
+        openDialog: (type: 'automation' | 'appointments' | 'logs') => Promise<void>
+        closeDialog: () => Promise<void>
+        getAutomationLogs: () => Promise<Array<{ id: string; at: string; platform: 'instagram'; conversation: string; action: 'reply'; status: 'sent' | 'failed'; detail: string }>>
+        clearAutomationLogs: () => Promise<void>
+        resetAutomationRuntime: () => Promise<void>
+        getScheduledMessages: () => Promise<Array<{ id: string; message: string; at: string; createdAt: string; platform: string; conversationId: string | null }>>
+        createScheduledMessage: (item: { id: string; message: string; at: string; createdAt?: string; platform?: string; conversationId?: string | null }) => Promise<void>
+        deleteScheduledMessage: (id: string) => Promise<void>
+        getAutomationFlows: () => Promise<Array<{ id: string; name: string; enabled: boolean; priority: number; definition: string; createdAt: string; updatedAt: string }>>
+        saveAutomationFlow: (flow: { id: string; name: string; enabled: boolean; priority?: number; definition: string; createdAt?: string }) => Promise<void>
+        deleteAutomationFlow: (id: string) => Promise<void>
     }
     onEvent: (channel: string, callback: (...args: any[]) => void) => void
     removeListener: (channel: string) => void

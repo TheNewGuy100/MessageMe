@@ -1,9 +1,11 @@
 import { ipcMain, BrowserWindow } from 'electron'
-import { whatsappService } from './whatsapp'
-import { instagramService } from './instagram'
-import { waClearAll } from './database'
+import { join } from 'path'
 import { debug } from './debug'
 import { safeErrorMessage } from '../shared/handlers/network-error'
+import { officialViews, OfficialViewMode } from './official-views'
+import { deleteAutomationFlow, deleteScheduledMessage, insertScheduledMessage, listAutomationFlows, listScheduledMessages, upsertAutomationFlow } from './database'
+
+const dialogWindows = new Set<BrowserWindow>()
 
 function broadcast(event: string, ...args: any[]) {
   BrowserWindow.getAllWindows().forEach(w => w.webContents.send(event, ...args))
@@ -25,67 +27,79 @@ function handle<T>(channel: string, fn: (...args: any[]) => T | Promise<T>) {
 }
 
 export function registerIpcHandlers() {
-  whatsappService.on('connecting', () => broadcast('whatsapp:connecting'))
-  whatsappService.on('qr', (qr: string) => broadcast('whatsapp:qr', qr))
-  whatsappService.on('connected', () => broadcast('whatsapp:connected'))
-  whatsappService.on('disconnected', (reason: string) => broadcast('whatsapp:disconnected', reason))
-  whatsappService.on('error', (msg: string) => broadcast('whatsapp:error', msg))
-  whatsappService.on('message', (msg: any) => broadcast('whatsapp:message', msg))
-  whatsappService.on('chatsUpdated', (chats: any[]) => broadcast('whatsapp:chatsUpdated', chats))
-  whatsappService.on('messagesUpdated', (chatIds: string[]) => broadcast('whatsapp:messagesUpdated', chatIds))
-  whatsappService.on('historySync', (syncing: boolean) => broadcast('whatsapp:historySync', syncing))
-
-  handle('whatsapp:getStatus', () => whatsappService.getStatus())
-  handle('whatsapp:getQRCode', () => whatsappService.getQRCode())
-  handle('whatsapp:getHistorySyncing', () => whatsappService.getHistorySyncing())
-  handle('whatsapp:connect', () => whatsappService.connect())
-  handle('whatsapp:disconnect', () => whatsappService.disconnect())
-  handle('whatsapp:getChats', () => whatsappService.getChats())
-  handle('whatsapp:getMessages', (chatId: string) => whatsappService.getMessages(chatId))
-  handle('whatsapp:getOlderMessages', (chatId: string, beforeId: string) => whatsappService.getOlderMessages(chatId, beforeId))
-  handle('whatsapp:getMedia', (chatId: string, messageId: string) => whatsappService.getMedia(chatId, messageId))
-  handle('whatsapp:sendMessage', (chatId: string, text: string) => whatsappService.sendMessage(chatId, text))
-  handle('whatsapp:sendMedia', (chatId: string, data: Uint8Array | ArrayBuffer, mimeType: string, fileName: string, caption?: string) =>
-    whatsappService.sendMedia(chatId, data, mimeType, fileName, caption))
-  handle('whatsapp:getProfilePicture', (jid: string) => whatsappService.getProfilePicture(jid))
-  handle('whatsapp:clearCreds', () => whatsappService.clearCreds())
-  handle('whatsapp:clearDatabase', () => whatsappService.clearDatabase())
-
-  instagramService.on('connected', () => broadcast('instagram:connected'))
-  instagramService.on('disconnected', () => broadcast('instagram:disconnected'))
-  instagramService.on('message', (msg: any) => broadcast('instagram:message', msg))
-  instagramService.on('threadsUpdated', (threads: any[]) => broadcast('instagram:threadsUpdated', threads))
-
-  handle('instagram:getStatus', () => instagramService.getStatus())
-  handle('instagram:loginWithBrowser', () => instagramService.loginWithBrowser())
-  handle('instagram:tryRestore', () => instagramService.tryRestore())
-  handle('instagram:logout', () => instagramService.logout())
-  handle('instagram:getThreads', () => instagramService.getThreads())
-  handle('instagram:getCachedThreads', (folder: string) => instagramService.getCachedThreads((folder as any) || 'main'))
-  handle('instagram:getMessages', (threadId: string) => instagramService.getMessages(threadId))
-  handle('instagram:getMessagesPage', (threadId: string, cursor?: string) => instagramService.getMessagesPage(threadId, cursor))
-  handle('instagram:getThreadsPage', (folder?: string, cursor?: string) => instagramService.getThreadsPage((folder as any) || 'main', cursor))
-  handle('instagram:searchThreads', (query: string) => instagramService.searchThreads(query))
-  handle('instagram:sendMessage', (threadId: string, text: string) => instagramService.sendMessage(threadId, text))
-
   handle('app:reload', () => {
-    BrowserWindow.getAllWindows().forEach(w => w.webContents.reloadIgnoringCache())
+    officialViews.reload()
   })
-  handle('app:clearTokens', async () => {
-    try {
-      await whatsappService.disconnect()
-      await whatsappService.clearCreds()
-    } catch (e) {
-      debug.log('[IPC] erro disconnect:', e)
+  handle('app:setSidebarWidth', (width: number) => officialViews.setSidebarWidth(width))
+  handle('app:setZoom', (percent: number) => officialViews.setZoom(percent))
+  handle('app:setAudioVolume', (volume: number) => officialViews.setAudioVolume(volume))
+  handle('app:getAudioVolume', () => officialViews.getAudioVolume())
+  handle('app:setViewMode', (mode: OfficialViewMode) => officialViews.setViewMode(mode))
+  handle('app:navigateInstagram', (section: 'inbox' | 'requests' | 'hidden') => officialViews.navigateInstagram(section))
+  handle('app:getUnreadCount', () => officialViews.getUnreadCount())
+  handle('app:getInstagramCounts', () => officialViews.getInstagramCounts())
+  handle('app:setInstagramAutomation', (enabled: boolean, text: string, automaticReplies: Array<{ message: string; start?: string; end?: string }>) => officialViews.setInstagramAutomation(enabled, text, automaticReplies))
+  handle('app:setGlobalAutomation', (enabled: boolean) => officialViews.setGlobalAutomation(enabled))
+  handle('app:getAutomationStatus', () => officialViews.getAutomationStatus())
+  handle('app:getAutomationLogs', () => officialViews.getAutomationLogs())
+  handle('app:clearAutomationLogs', () => officialViews.clearAutomationLogs())
+  handle('app:resetAutomationRuntime', () => officialViews.resetAutomationRuntime())
+  handle('app:getScheduledMessages', () => listScheduledMessages())
+  handle('app:createScheduledMessage', (item: { id: string; message: string; at: string; createdAt?: string; platform?: string; conversationId?: string | null }) => insertScheduledMessage(item))
+  handle('app:deleteScheduledMessage', (id: string) => deleteScheduledMessage(id))
+  handle('app:getAutomationFlows', () => listAutomationFlows())
+  handle('app:saveAutomationFlow', (flow: { id: string; name: string; enabled: boolean; priority?: number; definition: string; createdAt?: string }) => {
+    upsertAutomationFlow(flow)
+    officialViews.refreshAutomationStatus()
+  })
+  handle('app:deleteAutomationFlow', (id: string) => deleteAutomationFlow(id))
+  handle('app:openDialog', (type: 'automation' | 'appointments' | 'logs') => {
+    const existingDialog = [...dialogWindows][0]
+    if (existingDialog && !existingDialog.isDestroyed()) {
+      existingDialog.show()
+      existingDialog.focus()
+      return
     }
-    try {
-      waClearAll()
-      instagramService.logout()
-      debug.log('[IPC] tokens limpos')
-    } catch (e) {
-      debug.log('[IPC] erro clear:', e)
+    const parent = BrowserWindow.getAllWindows().find(window => !dialogWindows.has(window))
+    if (!parent || parent.isDestroyed()) return
+    const parentBounds = parent.getContentBounds()
+    const dialogWidth = Math.max(440, Math.round(parentBounds.width * 0.8))
+    const dialogHeight = Math.max(420, Math.round(parentBounds.height * 0.8))
+
+    const dialogWindow = new BrowserWindow({
+      parent,
+      width: dialogWidth,
+      height: dialogHeight,
+      minWidth: 440,
+      minHeight: 420,
+      frame: false,
+      show: false,
+      resizable: true,
+      autoHideMenuBar: true,
+      webPreferences: {
+        preload: join(__dirname, '../preload/index.js'),
+        sandbox: false,
+        contextIsolation: true,
+        nodeIntegration: false
+      }
+    })
+    dialogWindows.add(dialogWindow)
+
+    dialogWindow.once('ready-to-show', () => {
+      dialogWindow?.center()
+      dialogWindow?.show()
+    })
+    dialogWindow.on('closed', () => { dialogWindows.delete(dialogWindow) })
+
+    if (process.env.ELECTRON_RENDERER_URL) {
+      void dialogWindow.loadURL(`${process.env.ELECTRON_RENDERER_URL}?dialog=${type}`)
+    } else {
+      void dialogWindow.loadFile(join(__dirname, '../renderer/index.html'), { query: { dialog: type } })
     }
-    BrowserWindow.getAllWindows().forEach(w => w.webContents.reloadIgnoringCache())
+  })
+  handle('app:closeDialog', () => {
+    const focusedWindow = BrowserWindow.getFocusedWindow()
+    if (focusedWindow && dialogWindows.has(focusedWindow)) focusedWindow.close()
   })
 
   handle('debug:getEnabled', () => debug.enabled)

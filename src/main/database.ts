@@ -1,22 +1,56 @@
-import { join } from 'path'
 import { app } from 'electron'
 import Database from 'better-sqlite3'
-import { existsSync, mkdirSync } from 'fs'
+import { join } from 'path'
+import { mkdirSync } from 'fs'
 
-let db: Database.Database
-
-function getDb() {
-  if (!db) {
-    const dir = join(app.getPath('userData'), 'data')
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-    db = new Database(join(dir, 'message-manager.db'))
-    db.pragma('journal_mode = WAL')
-    initSchema()
-  }
-  return db
+export type ScheduledMessageRecord = {
+  id: string
+  platform: string
+  conversationId: string | null
+  message: string
+  scheduledAt: string
+  status: string
+  createdAt: string
+  updatedAt: string
 }
 
-function initSchema() {
+export type AutomationLogRecord = {
+  id: string
+  at: string
+  platform: 'instagram'
+  conversation: string
+  action: 'reply'
+  status: 'sent' | 'failed'
+  detail: string
+}
+
+export type AutomationFlowRecord = {
+  id: string
+  name: string
+  enabled: boolean
+  priority: number
+  definition: string
+  createdAt: string
+  updatedAt: string
+}
+
+let db: Database.Database | null = null
+
+export function getAppSetting(key: string): string | undefined {
+  const row = getDb().prepare('SELECT value FROM store WHERE namespace = ? AND key = ?').get('app', key) as { value?: string } | undefined
+  return row?.value
+}
+
+export function setAppSetting(key: string, value: string) {
+  getDb().prepare('INSERT OR REPLACE INTO store (namespace, key, value) VALUES (?, ?, ?)').run('app', key, value)
+}
+
+function getDb() {
+  if (db) return db
+  const directory = join(app.getPath('userData'), 'data')
+  mkdirSync(directory, { recursive: true })
+  db = new Database(join(directory, 'message-manager.db'))
+  db.pragma('journal_mode = WAL')
   db.exec(`
     CREATE TABLE IF NOT EXISTS store (
       namespace TEXT NOT NULL,
@@ -25,239 +59,204 @@ function initSchema() {
       PRIMARY KEY (namespace, key)
     );
 
-    CREATE TABLE IF NOT EXISTS wa_creds (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      data TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS wa_keys (
+    CREATE TABLE IF NOT EXISTS scheduled_messages (
       id TEXT PRIMARY KEY,
-      data TEXT NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS wa_chats (
-      id TEXT PRIMARY KEY,
-      data TEXT NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS wa_messages (
-      chat_id TEXT NOT NULL,
-      message_id TEXT NOT NULL,
-      message_timestamp INTEGER NOT NULL DEFAULT 0,
-      data TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (chat_id, message_id)
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_wa_messages_chat_time
-      ON wa_messages (chat_id, message_timestamp);
-
-    CREATE TABLE IF NOT EXISTS wa_outbox (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      chat_id TEXT NOT NULL,
-      kind TEXT NOT NULL,
-      data TEXT NOT NULL,
+      platform TEXT NOT NULL DEFAULT 'instagram',
+      conversation_id TEXT,
+      message TEXT NOT NULL,
+      scheduled_at TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'pending',
-      attempts INTEGER NOT NULL DEFAULT 0,
-      next_attempt_at INTEGER NOT NULL DEFAULT 0,
-      last_error TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_wa_outbox_pending
-      ON wa_outbox (status, next_attempt_at);
+    CREATE INDEX IF NOT EXISTS idx_scheduled_messages_date
+      ON scheduled_messages (scheduled_at, status);
 
-    CREATE TABLE IF NOT EXISTS instagram_threads (
-      folder TEXT NOT NULL,
-      id TEXT NOT NULL,
-      data TEXT NOT NULL,
-      updated_at INTEGER NOT NULL,
-      PRIMARY KEY (folder, id)
+    CREATE TABLE IF NOT EXISTS automation_flows (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      priority INTEGER NOT NULL DEFAULT 0,
+      definition TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_instagram_threads_folder
-      ON instagram_threads (folder, updated_at);
+    CREATE TABLE IF NOT EXISTS conversation_states (
+      platform TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      conversation_id TEXT NOT NULL,
+      flow_id TEXT,
+      state TEXT NOT NULL DEFAULT 'new',
+      variables TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (platform, account_id, conversation_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS processed_messages (
+      platform TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      message_id TEXT NOT NULL,
+      processed_at TEXT NOT NULL,
+      PRIMARY KEY (platform, account_id, message_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS automation_logs (
+      id TEXT PRIMARY KEY,
+      at TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      conversation TEXT NOT NULL,
+      action TEXT NOT NULL,
+      status TEXT NOT NULL,
+      detail TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_automation_logs_at
+      ON automation_logs (at DESC);
   `)
+  return db
 }
 
-export function storeGet(namespace: string, key: string): string | undefined {
-  const row = getDb().prepare('SELECT value FROM store WHERE namespace = ? AND key = ?').get(namespace, key) as any
-  return row?.value
-}
-
-export function storeSet(namespace: string, key: string, value: string) {
-  getDb().prepare('INSERT OR REPLACE INTO store (namespace, key, value) VALUES (?, ?, ?)').run(namespace, key, value)
-}
-
-export function storeDelete(namespace: string, key: string) {
-  getDb().prepare('DELETE FROM store WHERE namespace = ? AND key = ?').run(namespace, key)
-}
-
-export function storeList(namespace: string): { key: string; value: string }[] {
-  return getDb().prepare('SELECT key, value FROM store WHERE namespace = ?').all(namespace) as any
-}
-
-export function waGetCreds(): string | undefined {
-  const row = getDb().prepare('SELECT data FROM wa_creds WHERE id = 1').get() as any
-  return row?.data
-}
-
-export function waSetCreds(data: string) {
-  getDb().prepare('INSERT OR REPLACE INTO wa_creds (id, data) VALUES (1, ?)').run(data)
-}
-
-export function waGetKey(id: string): string | undefined {
-  const row = getDb().prepare('SELECT data FROM wa_keys WHERE id = ?').get(id) as any
-  return row?.data
-}
-
-export function waSetKey(id: string, data: string) {
-  getDb().prepare('INSERT OR REPLACE INTO wa_keys (id, data) VALUES (?, ?)').run(id, data)
-}
-
-export function waDeleteKey(id: string) {
-  getDb().prepare('DELETE FROM wa_keys WHERE id = ?').run(id)
-}
-
-export function waListKeys(): string[] {
-  return (getDb().prepare('SELECT id FROM wa_keys').all() as any[]).map(r => r.id)
-}
-
-export function waClearAll() {
-  const d = getDb()
-  d.prepare('DELETE FROM wa_creds').run()
-  d.prepare('DELETE FROM wa_keys').run()
-  d.prepare('DELETE FROM store WHERE namespace = ?').run('instagram')
-  d.prepare('DELETE FROM store WHERE namespace = ?').run('whatsapp')
-  d.prepare('DELETE FROM wa_chats').run()
-  d.prepare('DELETE FROM wa_messages').run()
-  d.prepare('DELETE FROM wa_outbox').run()
-  d.prepare('DELETE FROM instagram_threads').run()
-}
-
-export function waClearData() {
-  const d = getDb()
-  d.prepare('DELETE FROM store WHERE namespace = ?').run('whatsapp')
-  d.prepare('DELETE FROM wa_chats').run()
-  d.prepare('DELETE FROM wa_messages').run()
-  d.prepare('DELETE FROM wa_outbox').run()
-}
-
-export function instagramUpsertThreads(folder: string, threads: any[]) {
-  const statement = getDb().prepare(`
-    INSERT INTO instagram_threads (folder, id, data, updated_at)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(folder, id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
-  `)
-  const transaction = getDb().transaction((items: any[]) => {
-    const now = Date.now()
-    for (const thread of items || []) {
-      if (thread?.id) statement.run(folder, String(thread.id), JSON.stringify(thread), now)
-    }
-  })
-  transaction(threads)
-}
-
-export function instagramReplaceThreads(folder: string, threads: any[]) {
-  const db = getDb()
-  const replace = db.transaction((items: any[]) => {
-    db.prepare('DELETE FROM instagram_threads WHERE folder = ?').run(folder)
-    const now = Date.now()
-    const insert = db.prepare(`
-      INSERT INTO instagram_threads (folder, id, data, updated_at)
-      VALUES (?, ?, ?, ?)
-    `)
-    for (const thread of items || []) {
-      if (thread?.id) insert.run(folder, String(thread.id), JSON.stringify(thread), now)
-    }
-  })
-  replace(threads)
-}
-
-export function instagramListThreads(folder: string): { id: string; data: string }[] {
+export function listScheduledMessages(): ScheduledMessageRecord[] {
   return getDb().prepare(`
-    SELECT id, data FROM instagram_threads
-    WHERE folder = ? ORDER BY updated_at DESC
-  `).all(folder) as any
+    SELECT id, platform, conversation_id AS conversationId, message,
+      scheduled_at AS scheduledAt, status, created_at AS createdAt, updated_at AS updatedAt
+    FROM scheduled_messages
+    ORDER BY scheduled_at ASC
+  `).all() as ScheduledMessageRecord[]
 }
 
-export function instagramClearThreads(folder?: string) {
-  if (folder) getDb().prepare('DELETE FROM instagram_threads WHERE folder = ?').run(folder)
-  else getDb().prepare('DELETE FROM instagram_threads').run()
-}
-
-export function waUpsertChat(id: string, data: string) {
-  const now = Date.now()
+export function insertScheduledMessage(item: { id: string; message: string; at: string; createdAt?: string; platform?: string; conversationId?: string | null }) {
+  const now = new Date().toISOString()
   getDb().prepare(`
-    INSERT INTO wa_chats (id, data, updated_at) VALUES (?, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET data = excluded.data, updated_at = excluded.updated_at
-  `).run(id, data, now)
-}
-
-export function waListChats(): { id: string; data: string }[] {
-  return getDb().prepare('SELECT id, data FROM wa_chats ORDER BY updated_at ASC').all() as any
-}
-
-export function waUpsertMessage(chatId: string, messageId: string, timestamp: number, data: string) {
-  const now = Date.now()
-  getDb().prepare(`
-    INSERT INTO wa_messages (chat_id, message_id, message_timestamp, data, updated_at)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(chat_id, message_id) DO UPDATE SET
-      message_timestamp = excluded.message_timestamp,
-      data = excluded.data,
+    INSERT INTO scheduled_messages
+      (id, platform, conversation_id, message, scheduled_at, status, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      platform = excluded.platform,
+      conversation_id = excluded.conversation_id,
+      message = excluded.message,
+      scheduled_at = excluded.scheduled_at,
       updated_at = excluded.updated_at
-  `).run(chatId, messageId, timestamp, data, now)
+  `).run(item.id, item.platform || 'instagram', item.conversationId || null, item.message, item.at, item.createdAt || now, now)
 }
 
-export function waListMessages(chatId?: string): { chat_id: string; message_id: string; data: string }[] {
-  if (chatId) {
-    return getDb().prepare(`
-      SELECT chat_id, message_id, data FROM wa_messages
-      WHERE chat_id = ? ORDER BY message_timestamp ASC, message_id ASC
-    `).all(chatId) as any
-  }
-  return getDb().prepare('SELECT chat_id, message_id, data FROM wa_messages').all() as any
+export function deleteScheduledMessage(id: string) {
+  getDb().prepare('DELETE FROM scheduled_messages WHERE id = ?').run(id)
 }
 
-export function waEnqueueOutbox(chatId: string, kind: string, data: string): number {
-  const now = Date.now()
-  const result = getDb().prepare(`
-    INSERT INTO wa_outbox (chat_id, kind, data, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(chatId, kind, data, now, now)
-  return Number(result.lastInsertRowid)
-}
-
-export function waListPendingOutbox(): any[] {
+export function listAutomationFlows(): AutomationFlowRecord[] {
   return getDb().prepare(`
-    SELECT * FROM wa_outbox
-    WHERE status = 'pending' AND next_attempt_at <= ?
-    ORDER BY id ASC
-  `).all(Date.now()) as any
+    SELECT id, name, enabled, priority, definition,
+      created_at AS createdAt, updated_at AS updatedAt
+    FROM automation_flows ORDER BY priority DESC, created_at ASC
+  `).all().map((flow: any) => ({ ...flow, enabled: Boolean(flow.enabled) })) as AutomationFlowRecord[]
 }
 
-export function waRecoverOutbox() {
+export function upsertAutomationFlow(flow: { id: string; name: string; enabled: boolean; priority?: number; definition: string; createdAt?: string }) {
+  const now = new Date().toISOString()
   getDb().prepare(`
-    UPDATE wa_outbox
-    SET status = 'pending', next_attempt_at = 0, updated_at = ?
-    WHERE status = 'sending'
-  `).run(Date.now())
+    INSERT INTO automation_flows (id, name, enabled, priority, definition, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      enabled = excluded.enabled,
+      priority = excluded.priority,
+      definition = excluded.definition,
+      updated_at = excluded.updated_at
+  `).run(flow.id, flow.name, flow.enabled ? 1 : 0, flow.priority || 0, flow.definition, flow.createdAt || now, now)
 }
 
-export function waUpdateOutbox(id: number, status: string, attempts: number, error?: string, nextAttemptAt = 0) {
+export function deleteAutomationFlow(id: string) {
+  getDb().prepare('DELETE FROM automation_flows WHERE id = ?').run(id)
+}
+
+export type ConversationStateRecord = {
+  platform: string
+  accountId: string
+  conversationId: string
+  flowId: string | null
+  state: string
+  variables: string
+  updatedAt: string
+}
+
+export function getConversationState(platform: string, accountId: string, conversationId: string): ConversationStateRecord | undefined {
+  return getDb().prepare(`
+    SELECT platform, account_id AS accountId, conversation_id AS conversationId,
+      flow_id AS flowId, state, variables, updated_at AS updatedAt
+    FROM conversation_states
+    WHERE platform = ? AND account_id = ? AND conversation_id = ?
+  `).get(platform, accountId, conversationId) as ConversationStateRecord | undefined
+}
+
+export function upsertConversationState(state: { platform: string; accountId?: string; conversationId: string; flowId?: string | null; currentState: string; variables?: string }) {
+  const updatedAt = new Date().toISOString()
   getDb().prepare(`
-    UPDATE wa_outbox
-    SET status = ?, attempts = ?, last_error = ?, next_attempt_at = ?, updated_at = ?
-    WHERE id = ?
-  `).run(status, attempts, error || null, nextAttemptAt, Date.now(), id)
+    INSERT INTO conversation_states
+      (platform, account_id, conversation_id, flow_id, state, variables, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(platform, account_id, conversation_id) DO UPDATE SET
+      flow_id = excluded.flow_id,
+      state = excluded.state,
+      variables = excluded.variables,
+      updated_at = excluded.updated_at
+  `).run(state.platform, state.accountId || '', state.conversationId, state.flowId || null, state.currentState, state.variables || '{}', updatedAt)
+}
+
+export function listProcessedMessageIds(platform: string, accountId = ''): string[] {
+  return (getDb().prepare(`
+    SELECT message_id FROM processed_messages
+    WHERE platform = ? AND account_id = ?
+    ORDER BY processed_at DESC LIMIT 1000
+  `).all(platform, accountId) as Array<{ message_id: string }>).map(row => row.message_id)
+}
+
+export function markProcessedMessage(platform: string, messageId: string, accountId = '') {
+  getDb().prepare(`
+    INSERT OR IGNORE INTO processed_messages (platform, account_id, message_id, processed_at)
+    VALUES (?, ?, ?, ?)
+  `).run(platform, accountId, messageId, new Date().toISOString())
+  getDb().prepare(`
+    DELETE FROM processed_messages
+    WHERE platform = ? AND account_id = ?
+      AND message_id NOT IN (
+        SELECT message_id FROM processed_messages
+        WHERE platform = ? AND account_id = ?
+        ORDER BY processed_at DESC LIMIT 1000
+      )
+  `).run(platform, accountId, platform, accountId)
+}
+
+export function resetAutomationRuntime() {
+  getDb().exec('DELETE FROM processed_messages; DELETE FROM conversation_states;')
+}
+
+export function listAutomationLogs(): AutomationLogRecord[] {
+  return getDb().prepare(`
+    SELECT id, at, platform, conversation, action, status, detail
+    FROM automation_logs ORDER BY at DESC LIMIT 200
+  `).all() as AutomationLogRecord[]
+}
+
+export function insertAutomationLog(log: AutomationLogRecord) {
+  getDb().prepare(`
+    INSERT OR REPLACE INTO automation_logs
+      (id, at, platform, conversation, action, status, detail)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(log.id, log.at, log.platform, log.conversation, log.action, log.status, log.detail)
+  getDb().prepare(`
+    DELETE FROM automation_logs
+    WHERE id NOT IN (SELECT id FROM automation_logs ORDER BY at DESC LIMIT 200)
+  `).run()
+}
+
+export function clearAutomationLogs() {
+  getDb().prepare('DELETE FROM automation_logs').run()
 }
 
 export function closeDb() {
-  if (db) {
-    db.close()
-    db = undefined as any
-  }
+  db?.close()
+  db = null
 }

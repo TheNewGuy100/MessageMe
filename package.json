@@ -9,22 +9,21 @@
     "preview": "electron-vite preview"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0-rc14",
-    "better-sqlite3": "^13.0.2",
-    "pino": "^10.3.1",
-    "qrcode": "^1.5.4"
+    "@vue-flow/background": "^1.3.2",
+    "@vue-flow/controls": "^1.1.3",
+    "@vue-flow/core": "^1.48.2",
+    "@vue-flow/minimap": "^1.5.4",
+    "better-sqlite3": "^13.0.3"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.8",
     "electron": "^43.2.0",
     "electron-builder": "^26.15.3",
     "electron-vite": "6.0.0-beta.1",
-    "pinia": "^4.0.2",
     "sass-embedded": "^1.100.0",
     "typescript": "^7.0.2",
     "vite": "^7.0.0",
     "vue": "^3.5.40",
-    "vue-router": "^5.2.0",
     "vue-tsc": "^3.3.8"
   }
 }

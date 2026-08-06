@@ -4,8 +4,7 @@ import { registerIpcHandlers } from './ipc'
 import { debug, watchDevtools } from './debug'
 import { handleRenderError } from '../shared/handlers/render-error'
 import { handleNetworkError } from '../shared/handlers/network-error'
-import { whatsappService } from './whatsapp'
-import { instagramService } from './instagram'
+import { officialViews } from './official-views'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -26,6 +25,8 @@ function createWindow() {
   })
 
   watchDevtools(mainWindow)
+  officialViews.attach(mainWindow)
+  void officialViews.show()
 
   mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
     handleRenderError({ kind: 'load-failed', errorCode, errorDescription, url: validatedURL, isMainFrame })
@@ -61,8 +62,6 @@ function createWindow() {
 
 app.whenReady().then(() => {
   registerIpcHandlers()
-  whatsappService.connect().catch(error => console.error('[WA] startup error:', error))
-  instagramService.tryRestore().catch(error => console.error('[IG] startup restore error:', error))
   createWindow()
 
   app.on('activate', () => {

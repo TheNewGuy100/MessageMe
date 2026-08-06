@@ -9,38 +9,36 @@ async function invoke(channel, ...args) {
 }
 electron.contextBridge.exposeInMainWorld("electronAPI", {
   whatsapp: {
-    getStatus: () => invoke("whatsapp:getStatus"),
-    getQRCode: () => invoke("whatsapp:getQRCode"),
-    getHistorySyncing: () => invoke("whatsapp:getHistorySyncing"),
-    connect: () => invoke("whatsapp:connect"),
-    disconnect: () => invoke("whatsapp:disconnect"),
-    getChats: () => invoke("whatsapp:getChats"),
-    getMessages: (chatId) => invoke("whatsapp:getMessages", chatId),
-    getOlderMessages: (chatId, beforeId) => invoke("whatsapp:getOlderMessages", chatId, beforeId),
-    getMedia: (chatId, messageId) => invoke("whatsapp:getMedia", chatId, messageId),
-    sendMessage: (chatId, text) => invoke("whatsapp:sendMessage", chatId, text),
-    sendMedia: (chatId, data, mimeType, fileName, caption) => invoke("whatsapp:sendMedia", chatId, data, mimeType, fileName, caption),
-    getProfilePicture: (jid) => invoke("whatsapp:getProfilePicture", jid),
-    clearCreds: () => invoke("whatsapp:clearCreds"),
-    clearDatabase: () => invoke("whatsapp:clearDatabase")
+    open: () => invoke("app:toggleOfficialViews")
   },
   instagram: {
-    getStatus: () => invoke("instagram:getStatus"),
-    loginWithBrowser: () => invoke("instagram:loginWithBrowser"),
-    tryRestore: () => invoke("instagram:tryRestore"),
-    logout: () => invoke("instagram:logout"),
-    getThreads: () => invoke("instagram:getThreads"),
-    getCachedThreads: (folder) => invoke("instagram:getCachedThreads", folder || "main"),
-    getMessages: (threadId) => invoke("instagram:getMessages", threadId),
-    getMessagesPage: (threadId, cursor) => invoke("instagram:getMessagesPage", threadId, cursor),
-    getThreadsPage: (folder, cursor) => invoke("instagram:getThreadsPage", folder, cursor),
-    searchThreads: (query) => invoke("instagram:searchThreads", query),
-    sendMessage: (threadId, text) => invoke("instagram:sendMessage", threadId, text)
+    open: () => invoke("app:toggleOfficialViews"),
+    navigate: (section) => invoke("app:navigateInstagram", section)
   },
   app: {
     reload: () => invoke("app:reload"),
     hardReload: () => invoke("app:hardReload"),
-    clearTokens: () => invoke("app:clearTokens")
+    setSidebarWidth: (width) => invoke("app:setSidebarWidth", width),
+    setZoom: (percent) => invoke("app:setZoom", percent),
+    setAudioVolume: (volume) => invoke("app:setAudioVolume", volume),
+    getAudioVolume: () => invoke("app:getAudioVolume"),
+    setViewMode: (mode) => invoke("app:setViewMode", mode),
+    getUnreadCount: () => invoke("app:getUnreadCount"),
+    getInstagramCounts: () => invoke("app:getInstagramCounts"),
+    setInstagramAutomation: (enabled, text, automaticReplies) => invoke("app:setInstagramAutomation", enabled, text, automaticReplies),
+    setGlobalAutomation: (enabled) => invoke("app:setGlobalAutomation", enabled),
+    getAutomationStatus: () => invoke("app:getAutomationStatus"),
+    getAutomationLogs: () => invoke("app:getAutomationLogs"),
+    clearAutomationLogs: () => invoke("app:clearAutomationLogs"),
+    resetAutomationRuntime: () => invoke("app:resetAutomationRuntime"),
+    getScheduledMessages: () => invoke("app:getScheduledMessages"),
+    createScheduledMessage: (item) => invoke("app:createScheduledMessage", item),
+    deleteScheduledMessage: (id) => invoke("app:deleteScheduledMessage", id),
+    getAutomationFlows: () => invoke("app:getAutomationFlows"),
+    saveAutomationFlow: (flow) => invoke("app:saveAutomationFlow", flow),
+    deleteAutomationFlow: (id) => invoke("app:deleteAutomationFlow", id),
+    openDialog: (type) => invoke("app:openDialog", type),
+    closeDialog: () => invoke("app:closeDialog")
   },
   onEvent: (channel, callback) => {
     electron.ipcRenderer.on(channel, (_event, ...args) => callback(...args));
