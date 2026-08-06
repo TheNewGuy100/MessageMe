@@ -37,6 +37,7 @@ export function registerIpcHandlers() {
   handle('app:setViewMode', (mode: OfficialViewMode) => officialViews.setViewMode(mode))
   handle('app:navigateInstagram', (section: 'inbox' | 'requests' | 'hidden') => officialViews.navigateInstagram(section))
   handle('app:getUnreadCount', () => officialViews.getUnreadCount())
+  handle('app:getWhatsAppUnreadCount', () => officialViews.getWhatsAppUnreadCount())
   handle('app:getInstagramCounts', () => officialViews.getInstagramCounts())
   handle('app:setInstagramAutomation', (enabled: boolean, text: string, automaticReplies: Array<{ message: string; start?: string; end?: string }>) => officialViews.setInstagramAutomation(enabled, text, automaticReplies))
   handle('app:setGlobalAutomation', (enabled: boolean) => officialViews.setGlobalAutomation(enabled))
@@ -53,7 +54,7 @@ export function registerIpcHandlers() {
     officialViews.refreshAutomationStatus()
   })
   handle('app:deleteAutomationFlow', (id: string) => deleteAutomationFlow(id))
-  handle('app:openDialog', (type: 'automation' | 'appointments' | 'logs') => {
+  handle('app:openDialog', (type: 'dashboard' | 'automation' | 'appointments' | 'logs') => {
     const existingDialog = [...dialogWindows][0]
     if (existingDialog && !existingDialog.isDestroyed()) {
       existingDialog.show()

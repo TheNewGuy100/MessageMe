@@ -13,7 +13,7 @@ import WebViewsHeader from '@/components/WebViewsHeader.vue'
 import FlowNode from '@/components/FlowNode.vue'
 
 const api = window.electronAPI
-const dialogType = new URLSearchParams(window.location.search).get('dialog') as 'automation' | 'appointments' | 'logs' | null
+const dialogType = new URLSearchParams(window.location.search).get('dialog') as 'dashboard' | 'automation' | 'appointments' | 'logs' | null
 const isInstagramHeader = new URLSearchParams(window.location.search).has('instagram-header')
 const autoReplyEnabled = ref(localStorage.getItem('auto-reply-enabled') === 'true')
 const autoReplyText = ref(localStorage.getItem('auto-reply-text') || '')
@@ -27,6 +27,11 @@ type AutomationLog = { id: string; at: string; platform: 'instagram'; conversati
 const automationLogs = ref<AutomationLog[]>([])
 type DebugLog = { id: string; at: string; level: string; message: string }
 const debugLogs = ref<DebugLog[]>([])
+const dashboardUnread = ref(0)
+const dashboardInstagramCounts = ref({ inbox: 0, requests: 0, hidden: 0 })
+const dashboardWhatsAppUnread = ref(0)
+const dashboardAutomationStatus = ref({ enabled: false, configured: false, globalEnabled: false, running: false })
+let dashboardRefreshTimer: ReturnType<typeof setInterval> | null = null
 const logMode = ref<'automation' | 'debug'>('automation')
 type AutomationFlow = { id: string; name: string; enabled: boolean; priority: number; definition: string; createdAt: string; updatedAt: string }
 type FlowNode = { id: string; type: 'trigger' | 'message' | 'condition' | 'fallback' | 'end'; title: string; keywords: string; text: string; parentId?: string; position?: { x: number; y: number } }
@@ -253,6 +258,23 @@ function loadAutomaticReplies(): AutomaticReply[] {
   }
 }
 
+async function loadDashboard() {
+  try {
+    const [unread, instagramCounts, whatsappUnread, automationStatus] = await Promise.all([
+      api.app.getUnreadCount(),
+      api.app.getInstagramCounts(),
+      api.app.getWhatsAppUnreadCount(),
+      api.app.getAutomationStatus()
+    ])
+    dashboardUnread.value = unread
+    dashboardInstagramCounts.value = instagramCounts
+    dashboardWhatsAppUnread.value = whatsappUnread
+    dashboardAutomationStatus.value = automationStatus
+  } catch (error) {
+    console.error('[DASHBOARD] Falha ao carregar métricas', error)
+  }
+}
+
 function addAutomaticReply() {
   automaticReplies.value.push({ id: crypto.randomUUID(), message: '', start: '', end: '' })
 }
@@ -428,7 +450,7 @@ function changeFlowZoom(delta: number) {
 
 async function saveAutomationFlow() {
   const triggerNode = flowNodes.value.find(node => node.type === 'trigger') || mainFlowNodes.value[0]
-  const responseNode = flowNodes.value.find(node => node.type === 'message')
+  const responseNode = flowNodes.value.find(node => node.type === 'message' && node.text.trim()) || flowNodes.value.find(node => node.type === 'message')
   const responseText = (responseNode?.text || flowResponse.value).trim()
   const fallbackNode = flowNodes.value.find(node => node.id === flowFallbackNodeId.value) || flowNodes.value.find(node => node.type === 'fallback')
   if (!flowName.value.trim()) return
@@ -482,6 +504,8 @@ onMounted(() => {
     void api.app.getAutomationLogs().then(logs => { automationLogs.value = logs })
   }
   if (dialogType === 'automation') void loadAutomationFlows()
+  if (dialogType === 'dashboard') void loadDashboard()
+  if (dialogType === 'dashboard') dashboardRefreshTimer = setInterval(() => void loadDashboard(), 5000)
   api.onEvent('app:automation-logs', (logs: AutomationLog[]) => {
     automationLogs.value = logs
   })
@@ -513,6 +537,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (dashboardRefreshTimer) clearInterval(dashboardRefreshTimer)
+  dashboardRefreshTimer = null
   window.removeEventListener('keydown', handleGlobalKeydown)
   const api = window.electronAPI
   api.removeListener('debug:log')
@@ -535,12 +561,25 @@ function handleGlobalKeydown(event: KeyboardEvent) {
     <header class="dialog-header">
       <div>
         <span class="eyebrow">GESTÃO DE MENSAGENS</span>
-        <h1>{{ dialogType === 'automation' ? 'Automações' : dialogType === 'logs' ? 'Logs de automação' : 'Agendamentos' }}</h1>
+       <h1>{{ dialogType === 'dashboard' ? 'Dashboard' : dialogType === 'automation' ? 'Automações' : dialogType === 'logs' ? 'Logs de automação' : 'Agendamentos' }}</h1>
       </div>
       <button class="close-btn" title="Fechar" @click="api.app.closeDialog">×</button>
     </header>
     <div class="dialog-content">
-      <section v-if="dialogType === 'automation'" class="settings-page">
+       <section v-if="dialogType === 'dashboard'" class="dashboard-page">
+         <div class="dashboard-heading"><div><span class="eyebrow">VISÃO GERAL</span><h2>Resumo da operação</h2><p>Indicadores atuais das suas plataformas e automações.</p></div><button class="secondary-action" @click="loadDashboard">Atualizar</button></div>
+         <div class="dashboard-cards">
+           <article class="dashboard-card dashboard-card-highlight"><span class="dashboard-card-label">Não lidas</span><strong>{{ dashboardUnread }}</strong><small>Instagram + WhatsApp</small></article>
+           <article class="dashboard-card"><span class="dashboard-card-label">Instagram</span><strong>{{ dashboardInstagramCounts.inbox }}</strong><small>{{ dashboardInstagramCounts.requests }} solicitações · {{ dashboardInstagramCounts.hidden }} ocultas</small></article>
+           <article class="dashboard-card"><span class="dashboard-card-label">WhatsApp</span><strong>{{ dashboardWhatsAppUnread }}</strong><small>Conversas não lidas</small></article>
+           <article class="dashboard-card"><span class="dashboard-card-label">Automação</span><strong>{{ dashboardAutomationStatus.enabled ? 'Ativa' : 'Inativa' }}</strong><small>{{ dashboardAutomationStatus.running ? 'Processando agora' : dashboardAutomationStatus.configured ? 'Configurada' : 'Sem configuração' }}</small></article>
+         </div>
+         <div class="dashboard-grid">
+           <section class="dashboard-panel"><div class="dashboard-panel-heading"><div><h3>Relatórios de vendas</h3><p>Acompanhe pedidos, faturamento e conversão.</p></div><span class="dashboard-panel-icon">$</span></div><div class="dashboard-empty"><strong>Relatórios ainda não configurados</strong><span>Conecte uma fonte de vendas para começar a acompanhar seus resultados.</span></div></section>
+           <section class="dashboard-panel"><div class="dashboard-panel-heading"><div><h3>Distribuição de conversas</h3><p>Volume atual por área do Instagram.</p></div><span class="dashboard-panel-icon">◌</span></div><div class="dashboard-bars"><div><span>Conversas</span><strong>{{ dashboardInstagramCounts.inbox }}</strong><i><b :style="{ width: `${Math.min(100, dashboardInstagramCounts.inbox * 10)}%` }" /></i></div><div><span>Solicitações</span><strong>{{ dashboardInstagramCounts.requests }}</strong><i><b :style="{ width: `${Math.min(100, dashboardInstagramCounts.requests * 10)}%` }" /></i></div><div><span>Ocultas</span><strong>{{ dashboardInstagramCounts.hidden }}</strong><i><b :style="{ width: `${Math.min(100, dashboardInstagramCounts.hidden * 10)}%` }" /></i></div></div></section>
+         </div>
+       </section>
+       <section v-else-if="dialogType === 'automation'" class="settings-page">
         <nav class="automation-tabs">
           <button :class="{ active: automationTab === 'reply' }" @click="automationTab = 'reply'">Mensagens automáticas</button>
           <button :class="{ active: automationTab === 'flows' }" @click="automationTab = 'flows'">Fluxos</button>
@@ -575,7 +614,7 @@ function handleGlobalKeydown(event: KeyboardEvent) {
             <div class="section-heading"><span class="section-icon">⌁</span><div><h2>{{ selectedFlowId ? 'Editar fluxo' : 'Novo fluxo' }}</h2><p>Monte o caminho da conversa e defina um fallback.</p></div></div>
             <div class="settings-card flow-builder">
               <label class="flow-name-field">Nome do fluxo<input v-model="flowName" class="flow-name-input" type="text" placeholder="Ex.: Interesse em produto" /></label>
-              <div class="flow-node-actions"><button class="secondary-action" @click="addFlowNode('trigger')">+ Gatilho</button><button class="secondary-action" @click="addFlowNode('message')">+ Mensagem</button><button class="secondary-action" @click="addFlowNode('condition')">+ Condição</button><button class="secondary-action" @click="addFallbackFromNode">+ Fallback</button></div>
+               <div class="flow-node-actions"><button class="secondary-action" @click="addFlowNode('trigger')">+ Gatilho</button><button class="secondary-action" @click="addFlowNode('message')">+ Mensagem</button><button class="secondary-action" @click="addFlowNode('condition')">+ Condição</button><button class="secondary-action" @click="addFlowNode('end')">+ Fim</button><button class="secondary-action" @click="addFallbackFromNode">+ Fallback</button></div>
               <div class="flow-visual" :class="{ 'flow-visual-fullscreen': flowFullscreen }">
                 <div class="flow-canvas-tools"><span>Arraste os nós para organizar o fluxo</span><button @click="flowFullscreen = !flowFullscreen">{{ flowFullscreen ? 'Sair da tela cheia' : 'Tela cheia' }}</button></div>
                 <div class="flow-canvas vue-flow-canvas">
@@ -773,6 +812,30 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 .close-btn:hover { background: $bg-hover; color: $text-primary; }
 .dialog-content { flex: 1; min-height: 0; overflow-y: auto; padding: 0 24px 24px; scroll-behavior: auto; }
 .settings-page { color: $text-primary; overflow: visible; }
+.dashboard-page { display: grid; gap: 22px; color: $text-primary; }
+.dashboard-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
+.dashboard-heading h2 { margin: 6px 0 4px; font-size: 20px; }
+.dashboard-heading p { margin: 0; color: $text-secondary; font-size: 12px; }
+.dashboard-cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.dashboard-card { display: grid; gap: 8px; min-height: 116px; box-sizing: border-box; padding: 16px; background: $bg-secondary; border: 1px solid $border-color; border-radius: $radius-lg; }
+.dashboard-card-highlight { border-color: $accent; background: linear-gradient(145deg, $bg-accent-18, $bg-secondary 65%); }
+.dashboard-card-label { color: $text-secondary; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; }
+.dashboard-card strong { color: $text-primary; font-size: 25px; line-height: 1; }
+.dashboard-card small { color: $text-muted; font-size: 11px; }
+.dashboard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.dashboard-panel { min-height: 250px; padding: 18px; background: $bg-secondary; border: 1px solid $border-color; border-radius: $radius-lg; }
+.dashboard-panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.dashboard-panel-heading h3 { margin: 0 0 5px; font-size: 14px; }
+.dashboard-panel-heading p { margin: 0; color: $text-secondary; font-size: 11px; }
+.dashboard-panel-icon { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: $radius-md; background: $bg-accent-18; color: $accent; font-weight: 800; }
+.dashboard-empty { display: grid; place-items: center; gap: 8px; min-height: 180px; color: $text-muted; text-align: center; }
+.dashboard-empty strong { color: $text-secondary; font-size: 12px; }
+.dashboard-empty span { max-width: 270px; font-size: 11px; line-height: 1.5; }
+.dashboard-bars { display: grid; gap: 20px; margin-top: 30px; }
+.dashboard-bars > div { display: grid; grid-template-columns: 1fr auto; gap: 7px 12px; align-items: center; color: $text-secondary; font-size: 11px; }
+.dashboard-bars strong { color: $text-primary; font-size: 12px; }
+.dashboard-bars i { grid-column: 1 / -1; display: block; height: 7px; overflow: hidden; border-radius: 999px; background: $bg-primary; }
+.dashboard-bars b { display: block; height: 100%; min-width: 2px; border-radius: inherit; background: $accent; }
 .automation-tabs { display: flex; gap: 4px; margin-bottom: 18px; border-bottom: 1px solid $border-color; }
 .automation-tabs button { border: 0; border-bottom: 2px solid transparent; padding: 10px 12px; background: transparent; color: $text-secondary; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700; }
 .automation-tabs button.active { border-bottom-color: $accent; color: $accent; }
@@ -943,6 +1006,8 @@ textarea, input[type='datetime-local'] { width: 100%; box-sizing: border-box; bo
 .delete-btn:hover { background: $danger; color: #fff; }
 
 @media (max-width: 640px) {
+  .dashboard-cards, .dashboard-grid { grid-template-columns: 1fr; }
+  .dashboard-heading { align-items: flex-start; flex-direction: column; }
   .automation-workspace { display: block; min-height: 0; }
   .automation-list { margin-bottom: 18px; padding: 0 0 14px; border-right: 0; border-bottom: 1px solid $border-color; }
   .appointments-page { height: auto; }

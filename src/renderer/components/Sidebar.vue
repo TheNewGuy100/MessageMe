@@ -21,11 +21,14 @@ onMounted(() => {
     <div class="brand-row">
       <div class="logo">MM</div>
     </div>
-    <button class="collapse-btn menu-toggle" :title="compact ? 'Expandir menu' : 'Recolher menu'" @click="setCompact(!compact)">
-      {{ compact ? '›' : '‹' }}
+    <button class="collapse-btn" :title="compact ? 'Expandir menu' : 'Recolher menu'" :aria-label="compact ? 'Expandir menu' : 'Recolher menu'" @click="setCompact(!compact)">
+      <span class="collapse-icon">{{ compact ? '›' : '‹' }}</span><span class="collapse-label">{{ compact ? 'Expandir' : 'Recolher' }}</span>
     </button>
 
     <nav>
+      <button class="nav-item" title="Dashboard" @click="api.app.openDialog('dashboard')">
+        <span class="icon">▦</span><span class="label">Dashboard</span>
+      </button>
       <button class="nav-item" title="Automações" @click="api.app.openDialog('automation')">
         <span class="icon">✦</span><span class="label">Automações</span>
       </button>
@@ -34,11 +37,6 @@ onMounted(() => {
       </button>
     </nav>
 
-    <div class="bottom">
-      <button class="refresh-btn" title="Recarregar apps oficiais" @click="api.app.reload()">
-        <span class="icon">↻</span><span class="label">Recarregar</span>
-      </button>
-    </div>
   </aside>
 </template>
 
@@ -61,10 +59,11 @@ onMounted(() => {
   padding-right: 8px;
 }
 
-.brand-row { display: flex; align-items: center; min-height: 52px; }
-.logo { flex: 1; color: $accent; font-size: 22px; font-weight: 800; text-align: center; letter-spacing: 2px; }
-.collapse-btn { width: 32px; min-width: 32px; justify-content: center; padding: 6px; color: $text-secondary; font-size: 22px; }
-.menu-toggle { margin: 0 auto 12px; }
+.brand-row { display: flex; align-items: center; justify-content: center; min-height: 82px; box-sizing: border-box; }
+.logo { color: $accent; font-size: 24px; font-weight: 800; text-align: center; letter-spacing: 2px; }
+.collapse-btn { display: flex; align-items: center; justify-content: center; width: calc(100% + 16px); min-width: 0; height: 34px; margin: 0 -8px 14px; padding: 0 10px; border: 1px solid $border-input; border-right: 0; border-left: 0; border-radius: 0; background: $bg-primary; color: $text-secondary; font-size: 12px; line-height: 1; }
+.collapse-btn:hover { border-color: $accent; background: $bg-accent-18; color: $accent; }
+.collapse-icon { margin-right: 7px; font-size: 20px; transform: translateY(-1px); }
 
 nav { @include flex-column; gap: 4px; flex: 1; margin-top: 16px; }
 button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 10px; border: 0; background: transparent; color: $text-secondary; font: inherit; font-size: 13px; cursor: pointer; border-radius: $radius-md; transition: all $transition-fast; white-space: nowrap; }
@@ -74,8 +73,6 @@ button:hover { background: $bg-hover; color: $text-primary; }
 .label { overflow: hidden; text-overflow: ellipsis; }
 .compact .label { display: none; }
 .compact button { justify-content: center; padding-left: 8px; padding-right: 8px; }
-.bottom { display: grid; gap: 6px; padding-top: 10px; border-top: 1px solid $border-color; }
-.refresh-btn { justify-content: center; color: #fff; font-weight: 700; }
-.refresh-btn { background: $action; }
-.refresh-btn:hover { background: $action-hover; color: #fff; }
+.compact .collapse-label { display: none; }
+.compact .collapse-icon { margin-right: 0; }
 </style>

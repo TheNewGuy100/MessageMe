@@ -2,7 +2,8 @@ import { app, BrowserWindow, nativeImage, WebContentsView, shell } from 'electro
 import { deflateSync } from 'zlib'
 import { join } from 'path'
 import { appendFileSync } from 'fs'
-import { clearAutomationLogs as clearStoredAutomationLogs, getAppSetting, insertAutomationLog, listAutomationFlows, listAutomationLogs, listProcessedMessageIds, markProcessedMessage, resetAutomationRuntime as resetStoredAutomationRuntime, setAppSetting, upsertConversationState } from './database'
+import { clearAutomationLogs as clearStoredAutomationLogs, getAppSetting, insertAutomationLog, listAutomationFlows, listAutomationLogs, listProcessedMessageIds, listConversationStates, markProcessedMessage, resetAutomationRuntime as resetStoredAutomationRuntime, setAppSetting, upsertConversationState } from './database'
+import { AutomationController } from './automation/controller'
 
 const DEFAULT_SIDEBAR_WIDTH = 200
 export const OFFICIAL_VIEWS_HEADER_HEIGHT = 52
@@ -23,19 +24,20 @@ function writeAutomationDebug(event: string, data: Record<string, unknown> = {})
     // Diagnostics must never interrupt message processing.
   }
 }
-const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProcessed: boolean, flows: Array<{ id: string; keywords: string[]; response: string; fallbackResponse: string }>, processedMessageIds: string[], knownStates: Record<string, string>, automaticReplies: Array<{ message: string; start?: string; end?: string }>) => `(() => {
+const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProcessed: boolean, flows: Array<{ id: string; keywords: string[]; response: string; fallbackResponse: string; completed: boolean }>, processedMessageIds: string[], knownStates: Record<string, string>, automaticReplies: Array<{ message: string; start?: string; end?: string }>, activeFlowStates: Record<string, { flowId: string; updatedAt: string }>) => `(() => {
   const fallbackReply = ${JSON.stringify(text)}
   const flows = ${JSON.stringify(flows)}
   const automaticReplies = ${JSON.stringify(automaticReplies)}
   const processedMessageIds = new Set(${JSON.stringify(processedMessageIds)})
   const knownStates = ${JSON.stringify(knownStates)}
+  const activeFlowStates = ${JSON.stringify(activeFlowStates)}
   const primeOnly = ${prime}
   const allowProcessedOnce = ${allowProcessed}
   const ownPrefix = /(?:^|\\s)(você|voce|you|tu|tú|vos)\\s*:/i
   const markers = [...document.querySelectorAll('[data-visualcompletion="ignore"]')]
     .filter(element => /^(unread|não lida|nao lida|no leída|no leida)$/i.test((element.textContent || '').trim()))
   const observedStates = {}
-  const diagnostic = { url: location.href, rows: 0, markers: markers.length, eligible: 0, skippedState: 0, skippedProcessed: 0, skippedReply: 0, automaticReplies: automaticReplies.length, activeAutomaticReply: false }
+  const diagnostic = { url: location.href, rows: 0, markers: markers.length, eligible: 0, skippedState: 0, skippedProcessed: 0, skippedReply: 0, automaticReplies: automaticReplies.length, activeAutomaticReply: false, lockedFlow: false }
   const getPreview = row => {
     const unreadPattern = /^(unread|não lida|nao lida|no leída|no leida)$/i
     const previews = [...row.querySelectorAll('[data-visualcompletion="ignore"]')]
@@ -80,29 +82,10 @@ const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProce
       diagnostic.eligible++
       const preview = getPreview(row)
       if (ownPrefix.test(preview)) continue
-      const normalizedPreview = preview.toLocaleLowerCase()
       const scheduledReply = getScheduledAutomaticReply()
       diagnostic.activeAutomaticReply = Boolean(scheduledReply)
       let reply = scheduledReply || fallbackReply
       let selectedFlowId = null
-      for (const flow of flows) {
-        if (flow.keywords.some(keyword => normalizedPreview.includes(keyword))) {
-          reply = flow.response
-          selectedFlowId = flow.id
-          break
-        }
-      }
-      if (reply === fallbackReply) {
-        const fallbackFlow = flows.find(flow => flow.fallbackResponse)
-        if (fallbackFlow) {
-          reply = fallbackFlow.fallbackResponse
-          selectedFlowId = fallbackFlow.id
-        }
-      }
-      if (!reply || !reply.trim()) {
-        diagnostic.skippedReply++
-        continue
-      }
       const visibleName = row.querySelector('span[title]')?.getAttribute('title') || ''
       const profileLink = row.querySelector('a[aria-label^="Open the profile page of"]')
       const profileLabel = profileLink?.getAttribute('aria-label') || ''
@@ -133,6 +116,38 @@ const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProce
         returnToInbox()
         continue
       }
+      const flowState = activeFlowStates[profile]
+      const flowStateIsActive = flowState && flowState.flowId && Date.now() - Date.parse(flowState.updatedAt) < 3 * 60 * 60 * 1000
+      const normalizedMessage = messageText.toLocaleLowerCase()
+      if (flowStateIsActive) {
+        const lockedFlow = flows.find(flow => flow.id === flowState.flowId)
+        if (lockedFlow) {
+          reply = lockedFlow.response
+          selectedFlowId = lockedFlow.id
+          diagnostic.lockedFlow = true
+        }
+      } else {
+        for (const flow of flows) {
+          if (flow.keywords.some(keyword => normalizedMessage.includes(keyword))) {
+            reply = flow.response
+            selectedFlowId = flow.id
+            diagnostic.matchedFlow = true
+            break
+          }
+        }
+      }
+      if (!selectedFlowId) {
+        const fallbackFlow = flows.find(flow => flow.fallbackResponse)
+        if (fallbackFlow) {
+          reply = fallbackFlow.fallbackResponse
+          selectedFlowId = fallbackFlow.id
+        }
+      }
+      if (!reply || !reply.trim()) {
+        diagnostic.skippedReply++
+        returnToInbox()
+        continue
+      }
       const composer = document.querySelector('[data-pagelet="IGDComposerForCannes"] [contenteditable="true"][role="textbox"][data-lexical-editor="true"]')
       if (!composer) {
         returnToInbox()
@@ -144,7 +159,7 @@ const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProce
       composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }))
       await sleep(250)
       returnToInbox()
-      return { status: 'sent', conversation: name || 'Conversa sem nome', conversationId: profile, ownState: 'Você: ' + reply, flowId: selectedFlowId, messageId: key, states: observedStates, diagnostic }
+       return { status: 'sent', conversation: name || 'Conversa sem nome', conversationId: profile, ownState: 'Você: ' + reply, flowId: selectedFlowId, completed: Boolean(flows.find(flow => flow.id === selectedFlowId)?.completed), messageId: key, states: observedStates, diagnostic }
     }
     return { status: 'idle', states: observedStates, diagnostic }
   }
@@ -426,8 +441,10 @@ class OfficialViews {
   private automationAllowProcessedOnce = false
   private lastAutomationDiagnostic = ''
   private unreadCount = -1
+  private whatsappUnreadCount = 0
   private instagramCounts = { inbox: 0, requests: 0, hidden: 0 }
   private automationLogs: AutomationLog[] = []
+  private readonly automationController = new AutomationController()
 
   isVisible() {
     return this.visible
@@ -435,6 +452,8 @@ class OfficialViews {
 
   attach(window: BrowserWindow) {
     this.window = window
+    this.automationController.register({ platform: 'instagram', run: () => this.runInstagramAutomation() })
+    this.automationController.register({ platform: 'whatsapp', run: () => this.runWhatsAppAutomation() })
     this.automationGlobalEnabled = getAppSetting('automation-global-enabled') === 'true'
     this.automationEnabled = getAppSetting('automation-enabled') === 'true'
     this.automationText = getAppSetting('automation-text') || ''
@@ -583,6 +602,10 @@ class OfficialViews {
     return Math.max(0, this.unreadCount)
   }
 
+  getWhatsAppUnreadCount() {
+    return Math.max(0, this.whatsappUnreadCount)
+  }
+
   getInstagramCounts() {
     return this.instagramCounts
   }
@@ -644,8 +667,8 @@ class OfficialViews {
   private syncAutomationState() {
     const active = this.automationGlobalEnabled && this.hasConfiguredAutomation()
     if (active && !this.automationTimer) {
-      this.automationTimer = setInterval(() => void this.runInstagramAutomation(), 2000)
-      void this.runInstagramAutomation()
+      this.automationTimer = setInterval(() => void this.automationController.run(), 2000)
+      void this.automationController.run()
     } else if (!active && this.automationTimer) {
       clearInterval(this.automationTimer)
       this.automationTimer = null
@@ -682,7 +705,18 @@ class OfficialViews {
         else view.webContents.openDevTools({ mode: 'detach' })
       }
     })
-    if (url.includes('web.whatsapp.com')) view.webContents.setUserAgent(CHROME_USER_AGENT)
+    if (url.includes('web.whatsapp.com')) {
+      view.webContents.setUserAgent(CHROME_USER_AGENT)
+      const webContents = view.webContents
+      webContents.session.setPermissionRequestHandler((requestingContents, permission, callback) => {
+        const isWhatsApp = requestingContents === webContents && requestingContents.getURL().includes('web.whatsapp.com')
+        callback(isWhatsApp && (permission === 'media' || permission === 'notifications'))
+      })
+      webContents.session.setPermissionCheckHandler((requestingContents, permission) => {
+        const isWhatsApp = requestingContents === webContents && requestingContents.getURL().includes('web.whatsapp.com')
+        return isWhatsApp && (permission === 'media' || permission === 'notifications')
+      })
+    }
     this.applyAudioVolume(view)
     if (url.includes('instagram.com')) {
       view.webContents.on('did-finish-load', () => this.scheduleUnreadPoll(600))
@@ -813,6 +847,7 @@ class OfficialViews {
         this.pollInstagramProbe(),
         this.countUnread(this.whatsapp)
       ])
+      this.whatsappUnreadCount = whatsappCount
       this.updateTaskbarBadge(instagramTotal + whatsappCount)
     } finally {
       this.unreadPolling = false
@@ -846,21 +881,27 @@ class OfficialViews {
         .filter(flow => flow.enabled)
         .map(flow => {
           try {
-            const definition = JSON.parse(flow.definition) as { nodes?: Array<{ id: string; type?: string; text?: string }>; fallbackNodeId?: string | null; trigger?: { keywords?: string[] }; actions?: Array<{ type?: string; text?: string }> }
+            const definition = JSON.parse(flow.definition) as { nodes?: Array<{ id: string; type?: string; text?: string }>; edges?: Array<{ from: string; to: string }>; fallbackNodeId?: string | null; trigger?: { keywords?: string[] }; actions?: Array<{ type?: string; text?: string }> }
             const fallbackNode = definition.nodes?.find(node => node.id === definition.fallbackNodeId) || definition.nodes?.find(node => node.type === 'fallback')
+            const messageNode = definition.nodes?.find(node => node.type === 'message' && node.text?.trim())
+            const responseEdges = (definition.edges || []).filter(edge => edge.from === messageNode?.id)
+            const endNodeIds = new Set((definition.nodes || []).filter(node => node.type === 'end').map(node => node.id))
             return {
               id: flow.id,
               keywords: (definition.trigger?.keywords || []).map(keyword => keyword.toLocaleLowerCase()).filter(Boolean),
-              response: definition.actions?.find(action => action.type === 'reply')?.text?.trim() || '',
-              fallbackResponse: fallbackNode?.text?.trim() || ''
+              response: definition.actions?.find(action => action.type === 'reply')?.text?.trim() || messageNode?.text?.trim() || '',
+              fallbackResponse: fallbackNode?.text?.trim() || '',
+              completed: Boolean(messageNode && (responseEdges.length === 0 || responseEdges.some(edge => endNodeIds.has(edge.to))))
             }
           } catch {
-            return { id: flow.id, keywords: [], response: '', fallbackResponse: '' }
+            return { id: flow.id, keywords: [], response: '', fallbackResponse: '', completed: false }
           }
         })
         .filter(flow => (flow.keywords.length > 0 && flow.response) || flow.fallbackResponse)
+      writeAutomationDebug('flows-loaded', { flows: flows.map(flow => ({ id: flow.id, keywords: flow.keywords, responseLength: flow.response.length, fallbackLength: flow.fallbackResponse.length })) })
       const processedMessageIds = listProcessedMessageIds('instagram')
-      const result = await automationProbe.webContents.executeJavaScript(createInstagramAutoReplyScript(this.automationText, !this.automationPrimed, this.automationAllowProcessedOnce, flows, processedMessageIds, this.automationKnownStates, this.automaticReplies), true) as { status?: string; conversation?: string; conversationId?: string; ownState?: string; flowId?: string | null; messageId?: string; states?: Record<string, string>; diagnostic?: { url?: string; rows?: number; markers?: number; eligible?: number; skippedState?: number; skippedProcessed?: number; skippedReply?: number } }
+      const activeFlowStates = Object.fromEntries(listConversationStates('instagram').filter(state => state.state === 'awaiting_reply' && state.flowId && Date.now() - Date.parse(state.updatedAt) < 3 * 60 * 60 * 1000).map(state => [state.conversationId, { flowId: state.flowId!, updatedAt: state.updatedAt }]))
+      const result = await automationProbe.webContents.executeJavaScript(createInstagramAutoReplyScript(this.automationText, !this.automationPrimed, this.automationAllowProcessedOnce, flows, processedMessageIds, this.automationKnownStates, this.automaticReplies, activeFlowStates), true) as { status?: string; conversation?: string; conversationId?: string; ownState?: string; flowId?: string | null; completed?: boolean; messageId?: string; states?: Record<string, string>; diagnostic?: { url?: string; rows?: number; markers?: number; skippedState?: number; skippedProcessed?: number; skippedReply?: number } }
       this.automationKnownStates = result.states || this.automationKnownStates
       this.automationPrimed = true
       this.automationAllowProcessedOnce = false
@@ -890,7 +931,7 @@ class OfficialViews {
             platform: 'instagram',
             conversationId: result.conversationId,
             flowId: result.flowId,
-            currentState: 'awaiting_reply'
+            currentState: result.completed ? 'completed' : 'awaiting_reply'
           })
         }
         this.addAutomationLog({
@@ -912,6 +953,11 @@ class OfficialViews {
       this.automationBusy = false
       this.sendAutomationStatus(false)
     }
+  }
+
+  private async runWhatsAppAutomation() {
+    if (!this.whatsapp || this.whatsapp.webContents.isDestroyed()) return
+    writeAutomationDebug('whatsapp-automation', { status: 'adapter-not-implemented' })
   }
 
   private addAutomationLog(log: Omit<AutomationLog, 'id' | 'at' | 'platform'>) {

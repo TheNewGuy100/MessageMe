@@ -24,6 +24,7 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
     getAudioVolume: () => invoke("app:getAudioVolume"),
     setViewMode: (mode) => invoke("app:setViewMode", mode),
     getUnreadCount: () => invoke("app:getUnreadCount"),
+    getWhatsAppUnreadCount: () => invoke("app:getWhatsAppUnreadCount"),
     getInstagramCounts: () => invoke("app:getInstagramCounts"),
     setInstagramAutomation: (enabled, text, automaticReplies) => invoke("app:setInstagramAutomation", enabled, text, automaticReplies),
     setGlobalAutomation: (enabled) => invoke("app:setGlobalAutomation", enabled),

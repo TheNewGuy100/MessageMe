@@ -24,7 +24,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
         setAudioVolume: (volume: number) => invoke('app:setAudioVolume', volume),
         getAudioVolume: () => invoke<number>('app:getAudioVolume'),
        setViewMode: (mode: 'instagram' | 'whatsapp' | 'both') => invoke('app:setViewMode', mode),
-       getUnreadCount: () => invoke<number>('app:getUnreadCount'),
+        getUnreadCount: () => invoke<number>('app:getUnreadCount'),
+        getWhatsAppUnreadCount: () => invoke<number>('app:getWhatsAppUnreadCount'),
        getInstagramCounts: () => invoke<{ inbox: number; requests: number; hidden: number }>('app:getInstagramCounts'),
         setInstagramAutomation: (enabled: boolean, text: string, automaticReplies: Array<{ message: string; start?: string; end?: string }>) => invoke('app:setInstagramAutomation', enabled, text, automaticReplies),
        setGlobalAutomation: (enabled: boolean) => invoke('app:setGlobalAutomation', enabled),
@@ -38,7 +39,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
        getAutomationFlows: () => invoke<Array<{ id: string; name: string; enabled: boolean; priority: number; definition: string; createdAt: string; updatedAt: string }>>('app:getAutomationFlows'),
        saveAutomationFlow: (flow: { id: string; name: string; enabled: boolean; priority?: number; definition: string; createdAt?: string }) => invoke('app:saveAutomationFlow', flow),
        deleteAutomationFlow: (id: string) => invoke('app:deleteAutomationFlow', id),
-       openDialog: (type: 'automation' | 'appointments' | 'logs') => invoke('app:openDialog', type),
+        openDialog: (type: 'dashboard' | 'automation' | 'appointments' | 'logs') => invoke('app:openDialog', type),
       closeDialog: () => invoke('app:closeDialog')
   },
   onEvent: (channel: string, callback: (...args: any[]) => void) => {

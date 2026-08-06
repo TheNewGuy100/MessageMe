@@ -1,11 +1,21 @@
 {
   "name": "message-manager",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha.1",
   "description": "Gerenciador de mensagens WhatsApp e Instagram",
+  "author": {
+    "name": "Pedro Henrique Bohn Costa",
+    "email": "pedromenezescosta271@gmail.com"
+  },
+  "desktopName": "message-manager",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "dist": "npm run build && electron-builder --win nsis",
+    "dist:linux": "npm run build && electron-builder --linux AppImage deb rpm",
+    "dist:linux:deb": "npm run build && electron-builder --linux deb",
+    "dist:linux:rpm": "npm run build && electron-builder --linux rpm",
+    "dist:linux:appimage": "npm run build && electron-builder --linux AppImage",
     "preview": "electron-vite preview"
   },
   "dependencies": {

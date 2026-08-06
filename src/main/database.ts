@@ -191,6 +191,15 @@ export function getConversationState(platform: string, accountId: string, conver
   `).get(platform, accountId, conversationId) as ConversationStateRecord | undefined
 }
 
+export function listConversationStates(platform: string, accountId = ''): ConversationStateRecord[] {
+  return getDb().prepare(`
+    SELECT platform, account_id AS accountId, conversation_id AS conversationId,
+      flow_id AS flowId, state, variables, updated_at AS updatedAt
+    FROM conversation_states
+    WHERE platform = ? AND account_id = ?
+  `).all(platform, accountId) as ConversationStateRecord[]
+}
+
 export function upsertConversationState(state: { platform: string; accountId?: string; conversationId: string; flowId?: string | null; currentState: string; variables?: string }) {
   const updatedAt = new Date().toISOString()
   getDb().prepare(`

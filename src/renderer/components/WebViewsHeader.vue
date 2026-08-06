@@ -12,8 +12,10 @@ const zoom = ref(Number.isFinite(storedZoom) ? storedZoom : 100)
 const viewMode = ref<'instagram' | 'whatsapp' | 'both'>(
   (localStorage.getItem('official-views-mode') as 'instagram' | 'whatsapp' | 'both') || 'both'
 )
-const audioVolume = ref(100)
-const previousVolume = ref(100)
+const storedAudioVolume = Number(localStorage.getItem('official-views-audio-volume'))
+const hasStoredAudioVolume = Number.isFinite(storedAudioVolume)
+const audioVolume = ref(hasStoredAudioVolume ? storedAudioVolume : 100)
+const previousVolume = ref(audioVolume.value)
 const automationGlobalEnabled = ref(false)
 const automationConfigured = ref(false)
 const automationRunning = ref(false)
@@ -33,6 +35,7 @@ function setViewMode(mode: 'instagram' | 'whatsapp' | 'both') {
 function setAudioVolume(value: number) {
   audioVolume.value = Math.max(0, Math.min(100, value))
   if (audioVolume.value > 0) previousVolume.value = audioVolume.value
+  localStorage.setItem('official-views-audio-volume', String(audioVolume.value))
   void api.app.setAudioVolume(audioVolume.value)
 }
 
@@ -49,9 +52,11 @@ function toggleAutomation() {
 onMounted(() => {
   setZoom(zoom.value)
   setViewMode(viewMode.value)
-  void api.app.getAudioVolume().then(volume => {
+  if (hasStoredAudioVolume) setAudioVolume(audioVolume.value)
+  else void api.app.getAudioVolume().then(volume => {
     audioVolume.value = volume
-    if (volume > 0) previousVolume.value = volume
+    previousVolume.value = volume > 0 ? volume : previousVolume.value
+    localStorage.setItem('official-views-audio-volume', String(volume))
   })
   void api.app.getAutomationStatus().then(status => {
     automationGlobalEnabled.value = status.globalEnabled

@@ -10,8 +10,19 @@ files:
 win:
   target:
     - nsis
+linux:
+  target:
+    - AppImage
+    - deb
+    - rpm
+  category: Network
+  syncDesktopName: true
+  artifactName: ${name}-${version}-${arch}.${ext}
 nsis:
   artifactName: ${name}-${version}-setup.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
+  createStartMenuShortcut: true
+  perMachine: false
+  oneClick: false
