@@ -3,7 +3,7 @@ import { join } from 'path'
 import { debug } from './debug'
 import { safeErrorMessage } from '../shared/handlers/network-error'
 import { officialViews, OfficialViewMode } from './official-views'
-import { deleteAutomationFlow, deleteScheduledMessage, insertScheduledMessage, listAutomationFlows, listScheduledMessages, upsertAutomationFlow } from './database'
+import { deleteAutomationFlow, deleteScheduledMessage, getContactHistory, insertScheduledMessage, listAutomationFlows, listContacts, listScheduledMessages, upsertAutomationFlow } from './database'
 
 const dialogWindows = new Set<BrowserWindow>()
 
@@ -54,7 +54,9 @@ export function registerIpcHandlers() {
     officialViews.refreshAutomationStatus()
   })
   handle('app:deleteAutomationFlow', (id: string) => deleteAutomationFlow(id))
-  handle('app:openDialog', (type: 'dashboard' | 'automation' | 'appointments' | 'logs') => {
+  handle('app:getContacts', () => listContacts())
+  handle('app:getContactHistory', (contactId: string) => getContactHistory(contactId))
+  handle('app:openDialog', (type: 'dashboard' | 'automation' | 'appointments' | 'logs' | 'contacts') => {
     const existingDialog = [...dialogWindows][0]
     if (existingDialog && !existingDialog.isDestroyed()) {
       existingDialog.show()

@@ -38,7 +38,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
        deleteScheduledMessage: (id: string) => invoke('app:deleteScheduledMessage', id),
        getAutomationFlows: () => invoke<Array<{ id: string; name: string; enabled: boolean; priority: number; definition: string; createdAt: string; updatedAt: string }>>('app:getAutomationFlows'),
        saveAutomationFlow: (flow: { id: string; name: string; enabled: boolean; priority?: number; definition: string; createdAt?: string }) => invoke('app:saveAutomationFlow', flow),
-       deleteAutomationFlow: (id: string) => invoke('app:deleteAutomationFlow', id),
+        deleteAutomationFlow: (id: string) => invoke('app:deleteAutomationFlow', id),
+        getContacts: () => invoke<Array<{ id: string; platform: string; accountId: string; externalId: string; username: string | null; fullName: string | null; profilePicUrl: string | null; metadata: string; createdAt: string; updatedAt: string; conversationCount?: number; lastSeenAt?: string | null }>>('app:getContacts'),
+        getContactHistory: (contactId: string) => invoke<{ contact?: { id: string; platform: string; accountId: string; externalId: string; username: string | null; fullName: string | null; profilePicUrl: string | null; metadata: string; createdAt: string; updatedAt: string }; events: Array<{ id: string; contactId: string; platform: string; conversationId: string; eventType: string; direction: string; content: string | null; metadata: string; occurredAt: string }> }>('app:getContactHistory', contactId),
         openDialog: (type: 'dashboard' | 'automation' | 'appointments' | 'logs') => invoke('app:openDialog', type),
       closeDialog: () => invoke('app:closeDialog')
   },

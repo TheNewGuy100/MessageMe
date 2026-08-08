@@ -2,7 +2,7 @@ import { app, BrowserWindow, nativeImage, WebContentsView, shell } from 'electro
 import { deflateSync } from 'zlib'
 import { join } from 'path'
 import { appendFileSync } from 'fs'
-import { clearAutomationLogs as clearStoredAutomationLogs, getAppSetting, insertAutomationLog, listAutomationFlows, listAutomationLogs, listProcessedMessageIds, listConversationStates, markProcessedMessage, resetAutomationRuntime as resetStoredAutomationRuntime, setAppSetting, upsertConversationState } from './database'
+import { clearAutomationLogs as clearStoredAutomationLogs, getAppSetting, insertAutomationLog, insertContactEvent, listAutomationFlows, listAutomationLogs, listProcessedMessageIds, listConversationStates, markProcessedMessage, resetAutomationRuntime as resetStoredAutomationRuntime, setAppSetting, upsertContact, upsertContactConversation, upsertConversationState } from './database'
 import { AutomationController } from './automation/controller'
 
 const DEFAULT_SIDEBAR_WIDTH = 200
@@ -17,6 +17,48 @@ const INSTAGRAM_ROUTES = {
 }
 const AUTOMATION_DEBUG_LOG = join(process.cwd(), 'automation-debug.log')
 
+const INSTALL_INSTAGRAM_CONTACT_CAPTURE = `(() => {
+  if (window.__messageManagerContactCaptureInstalled) return true
+  const save = payload => {
+    try {
+      const thread = payload?.data?.get_slide_thread_nullable?.as_ig_direct_thread
+      const user = thread?.users?.find(item => item?.id && item.id !== thread.viewer_id) || thread?.users?.[0]
+      if (!thread || !user?.id) return
+      window.__messageManagerLastContact = {
+        conversationId: String(thread.thread_igid || thread.thread_fbid || thread.id || ''),
+        accountId: String(thread.viewer_id || thread.viewer?.id || ''),
+        externalId: String(user.id),
+        username: user.username || '',
+        fullName: user.full_name || '',
+        profilePicUrl: user.profile_pic_url || ''
+      }
+    } catch {}
+  }
+  const originalFetch = window.fetch
+  window.fetch = async (...args) => {
+    const response = await originalFetch(...args)
+    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || ''
+    if (url.includes('/api/graphql') || url.includes('/graphql')) response.clone().json().then(save).catch(() => {})
+    return response
+  }
+  const originalOpen = XMLHttpRequest.prototype.open
+  const originalSend = XMLHttpRequest.prototype.send
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this.__messageManagerUrl = String(url || '')
+    return originalOpen.call(this, method, url, ...rest)
+  }
+  XMLHttpRequest.prototype.send = function(...args) {
+    if (this.__messageManagerUrl?.includes('/api/graphql') || this.__messageManagerUrl?.includes('/graphql')) {
+      this.addEventListener('load', () => {
+        try { save(JSON.parse(this.responseText)) } catch {}
+      })
+    }
+    return originalSend.apply(this, args)
+  }
+  window.__messageManagerContactCaptureInstalled = true
+  return true
+})()`
+
 function writeAutomationDebug(event: string, data: Record<string, unknown> = {}) {
   try {
     appendFileSync(AUTOMATION_DEBUG_LOG, `${new Date().toISOString()} ${event} ${JSON.stringify(data)}\n`, 'utf8')
@@ -24,13 +66,14 @@ function writeAutomationDebug(event: string, data: Record<string, unknown> = {})
     // Diagnostics must never interrupt message processing.
   }
 }
-const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProcessed: boolean, flows: Array<{ id: string; keywords: string[]; response: string; fallbackResponse: string; completed: boolean }>, processedMessageIds: string[], knownStates: Record<string, string>, automaticReplies: Array<{ message: string; start?: string; end?: string }>, activeFlowStates: Record<string, { flowId: string; updatedAt: string }>) => `(() => {
+const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProcessed: boolean, flows: Array<{ id: string; keywords: string[]; response: string; fallbackResponse: string; completed: boolean; conditions: Array<{ keywords: string[]; response: string; completed: boolean }> }>, processedMessageIds: string[], knownStates: Record<string, string>, automaticReplies: Array<{ message: string; start?: string; end?: string }>, activeFlowStates: Record<string, { flowId: string; updatedAt: string }>, completedFlowStates: Record<string, boolean>) => `(() => {
   const fallbackReply = ${JSON.stringify(text)}
   const flows = ${JSON.stringify(flows)}
   const automaticReplies = ${JSON.stringify(automaticReplies)}
   const processedMessageIds = new Set(${JSON.stringify(processedMessageIds)})
   const knownStates = ${JSON.stringify(knownStates)}
   const activeFlowStates = ${JSON.stringify(activeFlowStates)}
+  const completedFlowStates = ${JSON.stringify(completedFlowStates)}
   const primeOnly = ${prime}
   const allowProcessedOnce = ${allowProcessed}
   const ownPrefix = /(?:^|\\s)(você|voce|you|tu|tú|vos)\\s*:/i
@@ -82,10 +125,11 @@ const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProce
       diagnostic.eligible++
       const preview = getPreview(row)
       if (ownPrefix.test(preview)) continue
-      const scheduledReply = getScheduledAutomaticReply()
-      diagnostic.activeAutomaticReply = Boolean(scheduledReply)
-      let reply = scheduledReply || fallbackReply
-      let selectedFlowId = null
+       const scheduledReply = getScheduledAutomaticReply()
+       diagnostic.activeAutomaticReply = Boolean(scheduledReply)
+       let reply = fallbackReply
+       let selectedFlowId = null
+       let completed = false
       const visibleName = row.querySelector('span[title]')?.getAttribute('title') || ''
       const profileLink = row.querySelector('a[aria-label^="Open the profile page of"]')
       const profileLabel = profileLink?.getAttribute('aria-label') || ''
@@ -93,7 +137,8 @@ const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProce
       const name = visibleName || username
       const profile = profileLink?.getAttribute('href') || username || name
 
-      row.click()
+       window.__messageManagerLastContact = null
+       row.click()
       await sleep(800)
       const header = document.querySelector('[data-pagelet="IGDInboxHeaderOffMsys"]')
       if (!header || header.querySelectorAll('img[alt="user-profile-picture"]').length !== 1) {
@@ -102,46 +147,65 @@ const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProce
       }
       const messageGroups = [...document.querySelectorAll('[data-pagelet="IGDMessagesList"] [role="group"]')]
       const lastMessage = messageGroups[messageGroups.length - 1]
-      const senderProfile = lastMessage?.querySelector('a[aria-label^="Open the profile page of"]')
-      if (!lastMessage || !senderProfile) {
-        diagnostic.skippedState++
-        returnToInbox()
-        continue
-      }
-      const messageText = (lastMessage.textContent || '').replace(/\s+/g, ' ').trim()
-      const messageTime = lastMessage.querySelector('abbr[aria-label]')?.getAttribute('aria-label') || ''
-      const key = profile + '|' + messageText + '|' + messageTime
-      if (processedMessageIds.has(key) && !allowProcessedOnce) {
-        diagnostic.skippedProcessed++
-        returnToInbox()
-        continue
-      }
-      const flowState = activeFlowStates[profile]
-      const flowStateIsActive = flowState && flowState.flowId && Date.now() - Date.parse(flowState.updatedAt) < 3 * 60 * 60 * 1000
-      const normalizedMessage = messageText.toLocaleLowerCase()
-      if (flowStateIsActive) {
-        const lockedFlow = flows.find(flow => flow.id === flowState.flowId)
-        if (lockedFlow) {
-          reply = lockedFlow.response
-          selectedFlowId = lockedFlow.id
-          diagnostic.lockedFlow = true
-        }
-      } else {
-        for (const flow of flows) {
-          if (flow.keywords.some(keyword => normalizedMessage.includes(keyword))) {
-            reply = flow.response
-            selectedFlowId = flow.id
-            diagnostic.matchedFlow = true
-            break
-          }
+       const senderProfile = lastMessage?.querySelector('a[aria-label^="Open the profile page of"]')
+       if (!lastMessage || !senderProfile) {
+         diagnostic.skippedState++
+         returnToInbox()
+         continue
+       }
+       const threadId = location.pathname.match(/\\/direct\\/t\\/([^/?]+)/i)?.[1]
+       const conversationId = threadId
+         ? 'thread:' + decodeURIComponent(threadId)
+         : senderProfile.getAttribute('href') || profile || username || name
+       if (!conversationId) {
+         diagnostic.skippedState++
+         returnToInbox()
+         continue
+       }
+       const messageText = (lastMessage.textContent || '').replace(/\\s+/g, ' ').trim()
+       const messageTime = lastMessage.querySelector('abbr[aria-label]')?.getAttribute('aria-label') || ''
+       const messageElementId = lastMessage.getAttribute('data-message-id') || lastMessage.querySelector('[data-message-id]')?.getAttribute('data-message-id') || ''
+       const flowState = activeFlowStates[conversationId]
+       const flowStateIsActive = flowState && flowState.flowId && Date.now() - Date.parse(flowState.updatedAt) < 3 * 60 * 60 * 1000
+       const normalizedMessage = messageText.toLocaleLowerCase()
+       const lockedFlow = flowStateIsActive ? flows.find(flow => flow.id === flowState.flowId) : null
+       const matchesTrigger = flows.some(flow => flow.keywords.some(keyword => normalizedMessage.includes(keyword)))
+       const matchesCondition = Boolean(lockedFlow?.conditions.some(item => item.keywords.some(keyword => normalizedMessage.includes(keyword))))
+       const completedConversation = Boolean(completedFlowStates[conversationId])
+       const canRetryProcessed = completedConversation || matchesTrigger || matchesCondition
+       const key = conversationId + '|' + (messageElementId || messageText + '|' + messageTime)
+       if (processedMessageIds.has(key) && !allowProcessedOnce && !canRetryProcessed) {
+         diagnostic.skippedProcessed++
+         returnToInbox()
+         continue
+       }
+       if (flowStateIsActive) {
+         if (lockedFlow) {
+           selectedFlowId = lockedFlow.id
+           diagnostic.lockedFlow = true
+           const condition = lockedFlow.conditions.find(item => item.keywords.some(keyword => normalizedMessage.includes(keyword)))
+           reply = condition?.response || lockedFlow.fallbackResponse || lockedFlow.response
+           completed = condition?.completed ?? lockedFlow.completed
+         }
+       } else {
+         reply = scheduledReply || fallbackReply
+         for (const flow of flows) {
+           if (flow.keywords.some(keyword => normalizedMessage.includes(keyword))) {
+             reply = flow.response
+             selectedFlowId = flow.id
+             completed = flow.completed
+             diagnostic.matchedFlow = true
+             break
+           }
         }
       }
       if (!selectedFlowId) {
         const fallbackFlow = flows.find(flow => flow.fallbackResponse)
-        if (fallbackFlow) {
-          reply = fallbackFlow.fallbackResponse
-          selectedFlowId = fallbackFlow.id
-        }
+         if (fallbackFlow) {
+           reply = fallbackFlow.fallbackResponse
+           selectedFlowId = fallbackFlow.id
+           completed = fallbackFlow.completed
+         }
       }
       if (!reply || !reply.trim()) {
         diagnostic.skippedReply++
@@ -159,7 +223,7 @@ const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProce
       composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }))
       await sleep(250)
       returnToInbox()
-       return { status: 'sent', conversation: name || 'Conversa sem nome', conversationId: profile, ownState: 'Você: ' + reply, flowId: selectedFlowId, completed: Boolean(flows.find(flow => flow.id === selectedFlowId)?.completed), messageId: key, states: observedStates, diagnostic }
+       return { status: 'sent', conversation: name || 'Conversa sem nome', conversationId, incomingText: messageText, contact: window.__messageManagerLastContact || null, ownState: 'Você: ' + reply, flowId: selectedFlowId, completed, rearm: completedConversation && !selectedFlowId, messageId: key, states: observedStates, diagnostic }
     }
     return { status: 'idle', states: observedStates, diagnostic }
   }
@@ -871,6 +935,7 @@ class OfficialViews {
     try {
       const automationProbe = await this.getInstagramAutomationProbe()
       if (!automationProbe || automationProbe.webContents.isDestroyed()) return
+      await automationProbe.webContents.executeJavaScript(INSTALL_INSTAGRAM_CONTACT_CAPTURE, true).catch(() => false)
       await automationProbe.webContents.executeJavaScript(`(() => {
         const notification = document.querySelector('[aria-label*="nova notificação" i], [aria-label*="new notification" i]')
         const inboxLink = document.querySelector('a[href="/direct/inbox/"]')
@@ -881,35 +946,57 @@ class OfficialViews {
         .filter(flow => flow.enabled)
         .map(flow => {
           try {
-            const definition = JSON.parse(flow.definition) as { nodes?: Array<{ id: string; type?: string; text?: string }>; edges?: Array<{ from: string; to: string }>; fallbackNodeId?: string | null; trigger?: { keywords?: string[] }; actions?: Array<{ type?: string; text?: string }> }
-            const fallbackNode = definition.nodes?.find(node => node.id === definition.fallbackNodeId) || definition.nodes?.find(node => node.type === 'fallback')
-            const messageNode = definition.nodes?.find(node => node.type === 'message' && node.text?.trim())
-            const responseEdges = (definition.edges || []).filter(edge => edge.from === messageNode?.id)
-            const endNodeIds = new Set((definition.nodes || []).filter(node => node.type === 'end').map(node => node.id))
-            return {
-              id: flow.id,
-              keywords: (definition.trigger?.keywords || []).map(keyword => keyword.toLocaleLowerCase()).filter(Boolean),
-              response: definition.actions?.find(action => action.type === 'reply')?.text?.trim() || messageNode?.text?.trim() || '',
-              fallbackResponse: fallbackNode?.text?.trim() || '',
-              completed: Boolean(messageNode && (responseEdges.length === 0 || responseEdges.some(edge => endNodeIds.has(edge.to))))
-            }
-          } catch {
-            return { id: flow.id, keywords: [], response: '', fallbackResponse: '', completed: false }
-          }
-        })
+             const definition = JSON.parse(flow.definition) as { nodes?: Array<{ id: string; type?: string; text?: string; keywords?: string; parentId?: string }>; edges?: Array<{ from: string; to: string }>; fallbackNodeId?: string | null; trigger?: { keywords?: string[] }; actions?: Array<{ type?: string; text?: string }> }
+             const fallbackNode = definition.nodes?.find(node => node.id === definition.fallbackNodeId) || definition.nodes?.find(node => node.type === 'fallback')
+             const messageNodes = definition.nodes?.filter(node => node.type === 'message' && node.text?.trim()) || []
+             const messageNode = messageNodes.find(node => !node.parentId) || messageNodes[0]
+             const edges = definition.edges || []
+             const endNodeIds = new Set((definition.nodes || []).filter(node => node.type === 'end').map(node => node.id))
+             const conditions = (definition.nodes || []).filter(node => node.type === 'condition').map(condition => {
+               const child = messageNodes.find(node => node.parentId === condition.id || edges.some(edge => edge.from === condition.id && edge.to === node.id))
+               const responseEdges = edges.filter(edge => edge.from === child?.id)
+               return {
+                 keywords: (condition.keywords || '').split(',').map(keyword => keyword.trim().toLocaleLowerCase()).filter(Boolean),
+                 response: child?.text?.trim() || '',
+                 completed: Boolean(child && (responseEdges.length === 0 || responseEdges.some(edge => endNodeIds.has(edge.to))))
+               }
+             }).filter(condition => condition.keywords.length > 0 && condition.response)
+             const responseEdges = edges.filter(edge => edge.from === messageNode?.id)
+             return {
+               id: flow.id,
+               keywords: (definition.trigger?.keywords || []).map(keyword => keyword.toLocaleLowerCase()).filter(Boolean),
+               response: definition.actions?.find(action => action.type === 'reply')?.text?.trim() || messageNode?.text?.trim() || '',
+               fallbackResponse: fallbackNode?.text?.trim() || '',
+               completed: Boolean(messageNode && conditions.length === 0 && (responseEdges.length === 0 || responseEdges.some(edge => endNodeIds.has(edge.to)))),
+               conditions
+             }
+           } catch {
+             return { id: flow.id, keywords: [], response: '', fallbackResponse: '', completed: false, conditions: [] }
+           }
+         })
         .filter(flow => (flow.keywords.length > 0 && flow.response) || flow.fallbackResponse)
-      writeAutomationDebug('flows-loaded', { flows: flows.map(flow => ({ id: flow.id, keywords: flow.keywords, responseLength: flow.response.length, fallbackLength: flow.fallbackResponse.length })) })
-      const processedMessageIds = listProcessedMessageIds('instagram')
-      const activeFlowStates = Object.fromEntries(listConversationStates('instagram').filter(state => state.state === 'awaiting_reply' && state.flowId && Date.now() - Date.parse(state.updatedAt) < 3 * 60 * 60 * 1000).map(state => [state.conversationId, { flowId: state.flowId!, updatedAt: state.updatedAt }]))
-      const result = await automationProbe.webContents.executeJavaScript(createInstagramAutoReplyScript(this.automationText, !this.automationPrimed, this.automationAllowProcessedOnce, flows, processedMessageIds, this.automationKnownStates, this.automaticReplies, activeFlowStates), true) as { status?: string; conversation?: string; conversationId?: string; ownState?: string; flowId?: string | null; completed?: boolean; messageId?: string; states?: Record<string, string>; diagnostic?: { url?: string; rows?: number; markers?: number; skippedState?: number; skippedProcessed?: number; skippedReply?: number } }
+       writeAutomationDebug('flows-loaded', { flows: flows.map(flow => ({ id: flow.id, keywords: flow.keywords, conditions: flow.conditions.length, responseLength: flow.response.length, fallbackLength: flow.fallbackResponse.length })) })
+       const instagramAccountId = getAppSetting('instagram-account-id') || ''
+       const processedMessageIds = listProcessedMessageIds('instagram', instagramAccountId)
+       const now = Date.now()
+       const conversationStates = listConversationStates('instagram', instagramAccountId)
+       for (const state of conversationStates) {
+         if (state.state === 'awaiting_reply' && now - Date.parse(state.updatedAt) >= 3 * 60 * 60 * 1000) {
+           upsertConversationState({ platform: state.platform, accountId: state.accountId, conversationId: state.conversationId, flowId: state.flowId, currentState: 'completed', variables: state.variables })
+         }
+       }
+       const activeFlowStates = Object.fromEntries(listConversationStates('instagram', instagramAccountId).filter(state => state.state === 'awaiting_reply' && state.flowId && now - Date.parse(state.updatedAt) < 3 * 60 * 60 * 1000).map(state => [state.conversationId, { flowId: state.flowId!, updatedAt: state.updatedAt }]))
+       const completedFlowStates = Object.fromEntries(listConversationStates('instagram', instagramAccountId).filter(state => state.state === 'completed').map(state => [state.conversationId, true]))
+       const result = await automationProbe.webContents.executeJavaScript(createInstagramAutoReplyScript(this.automationText, !this.automationPrimed, this.automationAllowProcessedOnce, flows, processedMessageIds, this.automationKnownStates, this.automaticReplies, activeFlowStates, completedFlowStates), true) as { status?: string; conversation?: string; conversationId?: string; incomingText?: string; contact?: { conversationId?: string; accountId?: string; externalId?: string; username?: string; fullName?: string; profilePicUrl?: string }; ownState?: string; flowId?: string | null; completed?: boolean; rearm?: boolean; messageId?: string; states?: Record<string, string>; diagnostic?: { url?: string; markers?: number; skippedState?: number; skippedProcessed?: number; skippedReply?: number } }
       this.automationKnownStates = result.states || this.automationKnownStates
       this.automationPrimed = true
       this.automationAllowProcessedOnce = false
       writeAutomationDebug('cycle-result', {
         status: result.status,
         diagnostic: result.diagnostic,
-        conversation: result.conversation || null,
-        flowId: result.flowId || null
+         conversation: result.conversation || null,
+         conversationId: result.conversationId || null,
+         flowId: result.flowId || null
       })
       if (result.status === 'idle' && result.diagnostic) {
         const diagnostic = `${result.diagnostic.url || 'sem URL'}|${result.diagnostic.rows || 0}|${result.diagnostic.markers || 0}|${result.diagnostic.skippedState || 0}|${result.diagnostic.skippedProcessed || 0}|${result.diagnostic.skippedReply || 0}`
@@ -923,17 +1010,50 @@ class OfficialViews {
           })
         }
       }
-      if (result?.status === 'sent') {
-        if (result.conversationId && result.ownState) this.automationKnownStates[result.conversationId] = result.ownState
-        if (result.messageId) markProcessedMessage('instagram', result.messageId)
-        if (result.conversationId) {
-          upsertConversationState({
-            platform: 'instagram',
-            conversationId: result.conversationId,
+        if (result?.status === 'sent') {
+         const resultAccountId = result.contact?.accountId || instagramAccountId
+         if (result.contact?.accountId) setAppSetting('instagram-account-id', result.contact.accountId)
+         if (result.conversationId && result.ownState) this.automationKnownStates[result.conversationId] = result.ownState
+         if (result.messageId) markProcessedMessage('instagram', result.messageId, resultAccountId)
+         if (result.contact?.externalId && result.conversationId) {
+           const contactId = upsertContact({
+             id: crypto.randomUUID(),
+             platform: 'instagram',
+             accountId: resultAccountId,
+             externalId: result.contact.externalId,
+             username: result.contact.username,
+             fullName: result.contact.fullName,
+             profilePicUrl: result.contact.profilePicUrl,
+             metadata: JSON.stringify({ threadId: result.contact.conversationId || result.conversationId })
+           })
+           upsertContactConversation({
+             platform: 'instagram',
+             accountId: resultAccountId,
+             conversationId: result.conversationId,
+             contactId,
+             state: result.flowId ? (result.completed ? 'completed' : 'awaiting_reply') : 'new'
+           })
+           if (result.messageId && result.incomingText) {
+             insertContactEvent({ id: `${result.messageId}:in`, contactId, platform: 'instagram', conversationId: result.conversationId, eventType: 'message', direction: 'inbound', content: result.incomingText, metadata: JSON.stringify({ messageId: result.messageId }) })
+             insertContactEvent({ id: `${result.messageId}:out`, contactId, platform: 'instagram', conversationId: result.conversationId, eventType: result.flowId ? 'flow_reply' : 'automatic_reply', direction: 'outbound', content: result.ownState?.replace(/^Você:\s*/, '') || null, metadata: JSON.stringify({ flowId: result.flowId || null, messageId: result.messageId }) })
+           }
+         }
+         if (result.conversationId && result.flowId) {
+             upsertConversationState({
+               platform: 'instagram',
+               accountId: resultAccountId,
+               conversationId: result.conversationId,
             flowId: result.flowId,
-            currentState: result.completed ? 'completed' : 'awaiting_reply'
-          })
-        }
+             currentState: result.completed ? 'completed' : 'awaiting_reply'
+           })
+         } else if (result.conversationId && result.rearm) {
+             upsertConversationState({
+               platform: 'instagram',
+               accountId: resultAccountId,
+               conversationId: result.conversationId,
+             currentState: 'new'
+           })
+         }
         this.addAutomationLog({
           conversation: result.conversation || 'Conversa sem nome',
           action: 'reply',
@@ -941,8 +1061,8 @@ class OfficialViews {
           detail: 'Resposta automática enviada'
         })
       }
-    } catch {
-      writeAutomationDebug('cycle-error')
+    } catch (error: any) {
+      writeAutomationDebug('cycle-error', { message: String(error?.message || error), stack: String(error?.stack || '') })
       this.addAutomationLog({
         conversation: 'Instagram',
         action: 'reply',

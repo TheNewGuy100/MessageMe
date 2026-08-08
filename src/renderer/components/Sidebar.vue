@@ -35,6 +35,9 @@ onMounted(() => {
       <button class="nav-item" title="Agendamentos" @click="api.app.openDialog('appointments')">
         <span class="icon">▤</span><span class="label">Agendamentos</span>
       </button>
+      <button class="nav-item" title="Contatos" @click="api.app.openDialog('contacts')">
+        <span class="icon">♙</span><span class="label">Contatos</span>
+      </button>
     </nav>
 
   </aside>

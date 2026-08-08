@@ -29,7 +29,7 @@ interface Window {
         setInstagramAutomation: (enabled: boolean, text: string, automaticReplies: Array<{ message: string; start?: string; end?: string }>) => Promise<void>
         setGlobalAutomation: (enabled: boolean) => Promise<void>
         getAutomationStatus: () => Promise<{ enabled: boolean; configured: boolean; globalEnabled: boolean; running: boolean }>
-        openDialog: (type: 'dashboard' | 'automation' | 'appointments' | 'logs') => Promise<void>
+        openDialog: (type: 'dashboard' | 'automation' | 'appointments' | 'logs' | 'contacts') => Promise<void>
         closeDialog: () => Promise<void>
         getAutomationLogs: () => Promise<Array<{ id: string; at: string; platform: 'instagram'; conversation: string; action: 'reply'; status: 'sent' | 'failed'; detail: string }>>
         clearAutomationLogs: () => Promise<void>
@@ -40,6 +40,8 @@ interface Window {
         getAutomationFlows: () => Promise<Array<{ id: string; name: string; enabled: boolean; priority: number; definition: string; createdAt: string; updatedAt: string }>>
         saveAutomationFlow: (flow: { id: string; name: string; enabled: boolean; priority?: number; definition: string; createdAt?: string }) => Promise<void>
         deleteAutomationFlow: (id: string) => Promise<void>
+        getContacts: () => Promise<Array<{ id: string; platform: string; accountId: string; externalId: string; username: string | null; fullName: string | null; profilePicUrl: string | null; metadata: string; createdAt: string; updatedAt: string; conversationCount?: number; lastSeenAt?: string | null }>>
+        getContactHistory: (contactId: string) => Promise<{ contact?: { id: string; platform: string; accountId: string; externalId: string; username: string | null; fullName: string | null; profilePicUrl: string | null; metadata: string; createdAt: string; updatedAt: string }; events: Array<{ id: string; contactId: string; platform: string; conversationId: string; eventType: string; direction: string; content: string | null; metadata: string; occurredAt: string }> }>
     }
     onEvent: (channel: string, callback: (...args: any[]) => void) => void
     removeListener: (channel: string) => void

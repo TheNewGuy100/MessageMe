@@ -94,6 +94,54 @@ function getDb() {
       PRIMARY KEY (platform, account_id, conversation_id)
     );
 
+    CREATE TABLE IF NOT EXISTS contacts (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      external_id TEXT NOT NULL,
+      username TEXT,
+      full_name TEXT,
+      profile_pic_url TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (platform, account_id, external_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contacts_updated
+      ON contacts (updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS contact_conversations (
+      platform TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      conversation_id TEXT NOT NULL,
+      contact_id TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'new',
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      PRIMARY KEY (platform, account_id, conversation_id),
+      FOREIGN KEY (contact_id) REFERENCES contacts (id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contact_conversations_contact
+      ON contact_conversations (contact_id, last_seen_at DESC);
+
+    CREATE TABLE IF NOT EXISTS contact_events (
+      id TEXT PRIMARY KEY,
+      contact_id TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      content TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      occurred_at TEXT NOT NULL,
+      FOREIGN KEY (contact_id) REFERENCES contacts (id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contact_events_contact
+      ON contact_events (contact_id, occurred_at DESC);
+
     CREATE TABLE IF NOT EXISTS processed_messages (
       platform TEXT NOT NULL,
       account_id TEXT NOT NULL DEFAULT '',
@@ -180,6 +228,100 @@ export type ConversationStateRecord = {
   state: string
   variables: string
   updatedAt: string
+}
+
+export type ContactRecord = {
+  id: string
+  platform: string
+  accountId: string
+  externalId: string
+  username: string | null
+  fullName: string | null
+  profilePicUrl: string | null
+  metadata: string
+  createdAt: string
+  updatedAt: string
+  conversationCount?: number
+  lastSeenAt?: string | null
+}
+
+export type ContactEventRecord = {
+  id: string
+  contactId: string
+  platform: string
+  conversationId: string
+  eventType: string
+  direction: string
+  content: string | null
+  metadata: string
+  occurredAt: string
+}
+
+export function upsertContact(contact: { id: string; platform: string; accountId?: string; externalId: string; username?: string | null; fullName?: string | null; profilePicUrl?: string | null; metadata?: string }) {
+  const now = new Date().toISOString()
+  const existing = getDb().prepare('SELECT id FROM contacts WHERE platform = ? AND account_id = ? AND external_id = ?').get(contact.platform, contact.accountId || '', contact.externalId) as { id: string } | undefined
+  const contactId = existing?.id || contact.id
+  getDb().prepare(`
+    INSERT INTO contacts
+      (id, platform, account_id, external_id, username, full_name, profile_pic_url, metadata, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(platform, account_id, external_id) DO UPDATE SET
+      username = COALESCE(excluded.username, contacts.username),
+      full_name = COALESCE(excluded.full_name, contacts.full_name),
+      profile_pic_url = COALESCE(excluded.profile_pic_url, contacts.profile_pic_url),
+      metadata = CASE WHEN excluded.metadata = '{}' THEN contacts.metadata ELSE excluded.metadata END,
+      updated_at = excluded.updated_at
+  `).run(contactId, contact.platform, contact.accountId || '', contact.externalId, contact.username || null, contact.fullName || null, contact.profilePicUrl || null, contact.metadata || '{}', now, now)
+  return contactId
+}
+
+export function upsertContactConversation(conversation: { platform: string; accountId?: string; conversationId: string; contactId: string; state?: string }) {
+  const now = new Date().toISOString()
+  getDb().prepare(`
+    INSERT INTO contact_conversations
+      (platform, account_id, conversation_id, contact_id, state, first_seen_at, last_seen_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(platform, account_id, conversation_id) DO UPDATE SET
+      contact_id = excluded.contact_id,
+      state = excluded.state,
+      last_seen_at = excluded.last_seen_at
+  `).run(conversation.platform, conversation.accountId || '', conversation.conversationId, conversation.contactId, conversation.state || 'new', now, now)
+}
+
+export function insertContactEvent(event: { id: string; contactId: string; platform: string; conversationId: string; eventType: string; direction: string; content?: string | null; metadata?: string; occurredAt?: string }) {
+  getDb().prepare(`
+    INSERT OR IGNORE INTO contact_events
+      (id, contact_id, platform, conversation_id, event_type, direction, content, metadata, occurred_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(event.id, event.contactId, event.platform, event.conversationId, event.eventType, event.direction, event.content || null, event.metadata || '{}', event.occurredAt || new Date().toISOString())
+}
+
+export function listContacts(): ContactRecord[] {
+  return getDb().prepare(`
+    SELECT c.id, c.platform, c.account_id AS accountId, c.external_id AS externalId,
+      c.username, c.full_name AS fullName, c.profile_pic_url AS profilePicUrl,
+      c.metadata, c.created_at AS createdAt, c.updated_at AS updatedAt,
+      COUNT(cc.conversation_id) AS conversationCount, MAX(cc.last_seen_at) AS lastSeenAt
+    FROM contacts c
+    LEFT JOIN contact_conversations cc ON cc.contact_id = c.id
+    GROUP BY c.id
+    ORDER BY COALESCE(MAX(cc.last_seen_at), c.updated_at) DESC
+  `).all() as ContactRecord[]
+}
+
+export function getContactHistory(contactId: string): { contact: ContactRecord | undefined; events: ContactEventRecord[] } {
+  const contact = getDb().prepare(`
+    SELECT id, platform, account_id AS accountId, external_id AS externalId,
+      username, full_name AS fullName, profile_pic_url AS profilePicUrl,
+      metadata, created_at AS createdAt, updated_at AS updatedAt
+    FROM contacts WHERE id = ?
+  `).get(contactId) as ContactRecord | undefined
+  const events = getDb().prepare(`
+    SELECT id, contact_id AS contactId, platform, conversation_id AS conversationId,
+      event_type AS eventType, direction, content, metadata, occurred_at AS occurredAt
+    FROM contact_events WHERE contact_id = ? ORDER BY occurred_at DESC LIMIT 500
+  `).all(contactId) as ContactEventRecord[]
+  return { contact, events }
 }
 
 export function getConversationState(platform: string, accountId: string, conversationId: string): ConversationStateRecord | undefined {

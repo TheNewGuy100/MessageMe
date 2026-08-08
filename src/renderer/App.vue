@@ -13,7 +13,7 @@ import WebViewsHeader from '@/components/WebViewsHeader.vue'
 import FlowNode from '@/components/FlowNode.vue'
 
 const api = window.electronAPI
-const dialogType = new URLSearchParams(window.location.search).get('dialog') as 'dashboard' | 'automation' | 'appointments' | 'logs' | null
+const dialogType = new URLSearchParams(window.location.search).get('dialog') as 'dashboard' | 'automation' | 'appointments' | 'logs' | 'contacts' | null
 const isInstagramHeader = new URLSearchParams(window.location.search).has('instagram-header')
 const autoReplyEnabled = ref(localStorage.getItem('auto-reply-enabled') === 'true')
 const autoReplyText = ref(localStorage.getItem('auto-reply-text') || '')
@@ -25,6 +25,12 @@ type ScheduledItem = { id: string; message: string; at: string; createdAt: strin
 const scheduledItems = ref<ScheduledItem[]>(loadScheduledItems())
 type AutomationLog = { id: string; at: string; platform: 'instagram'; conversation: string; action: 'reply'; status: 'sent' | 'failed'; detail: string }
 const automationLogs = ref<AutomationLog[]>([])
+type Contact = { id: string; platform: string; accountId: string; externalId: string; username: string | null; fullName: string | null; profilePicUrl: string | null; metadata: string; createdAt: string; updatedAt: string; conversationCount?: number; lastSeenAt?: string | null }
+type ContactEvent = { id: string; contactId: string; platform: string; conversationId: string; eventType: string; direction: string; content: string | null; metadata: string; occurredAt: string }
+const contacts = ref<Contact[]>([])
+const selectedContactId = ref<string | null>(null)
+const selectedContact = ref<Contact | null>(null)
+const contactEvents = ref<ContactEvent[]>([])
 type DebugLog = { id: string; at: string; level: string; message: string }
 const debugLogs = ref<DebugLog[]>([])
 const dashboardUnread = ref(0)
@@ -351,6 +357,18 @@ async function loadAutomationFlows() {
   automationFlows.value = await api.app.getAutomationFlows()
 }
 
+async function loadContacts() {
+  contacts.value = await api.app.getContacts()
+  if (selectedContactId.value && contacts.value.some(contact => contact.id === selectedContactId.value)) await selectContact(selectedContactId.value)
+}
+
+async function selectContact(contactId: string) {
+  selectedContactId.value = contactId
+  const history = await api.app.getContactHistory(contactId)
+  selectedContact.value = history.contact || null
+  contactEvents.value = history.events
+}
+
 function selectFlow(flow: AutomationFlow) {
   selectedFlowId.value = flow.id
   removedFlowEdgeKeys.value = new Set()
@@ -503,7 +521,8 @@ onMounted(() => {
   if (dialogType === 'logs') {
     void api.app.getAutomationLogs().then(logs => { automationLogs.value = logs })
   }
-  if (dialogType === 'automation') void loadAutomationFlows()
+   if (dialogType === 'automation') void loadAutomationFlows()
+   if (dialogType === 'contacts') void loadContacts()
   if (dialogType === 'dashboard') void loadDashboard()
   if (dialogType === 'dashboard') dashboardRefreshTimer = setInterval(() => void loadDashboard(), 5000)
   api.onEvent('app:automation-logs', (logs: AutomationLog[]) => {
@@ -561,12 +580,36 @@ function handleGlobalKeydown(event: KeyboardEvent) {
     <header class="dialog-header">
       <div>
         <span class="eyebrow">GESTÃO DE MENSAGENS</span>
-       <h1>{{ dialogType === 'dashboard' ? 'Dashboard' : dialogType === 'automation' ? 'Automações' : dialogType === 'logs' ? 'Logs de automação' : 'Agendamentos' }}</h1>
+       <h1>{{ dialogType === 'dashboard' ? 'Dashboard' : dialogType === 'automation' ? 'Automações' : dialogType === 'logs' ? 'Logs de automação' : dialogType === 'contacts' ? 'Contatos' : 'Agendamentos' }}</h1>
       </div>
       <button class="close-btn" title="Fechar" @click="api.app.closeDialog">×</button>
     </header>
     <div class="dialog-content">
-       <section v-if="dialogType === 'dashboard'" class="dashboard-page">
+        <section v-if="dialogType === 'contacts'" class="contacts-page">
+          <div class="contacts-layout">
+            <aside class="contacts-list">
+              <div class="contacts-heading"><div><span class="eyebrow">BASE DE CLIENTES</span><h2>Contatos</h2></div><button class="secondary-action" @click="loadContacts">Atualizar</button></div>
+              <button v-for="contact in contacts" :key="contact.id" class="contact-list-item" :class="{ active: selectedContactId === contact.id }" @click="selectContact(contact.id)">
+                <img v-if="contact.profilePicUrl" :src="contact.profilePicUrl" alt="" />
+                <span v-else class="contact-avatar">{{ (contact.fullName || contact.username || '?').slice(0, 1).toUpperCase() }}</span>
+                <span><strong>{{ contact.fullName || contact.username || contact.externalId }}</strong><small>{{ contact.platform }} · {{ contact.conversationCount || 0 }} conversa{{ contact.conversationCount === 1 ? '' : 's' }}</small></span>
+              </button>
+              <p v-if="contacts.length === 0" class="empty-state">Nenhum contato capturado ainda.</p>
+            </aside>
+            <section class="contact-detail">
+              <template v-if="selectedContact">
+                <div class="contact-detail-heading">
+                  <div><span class="eyebrow">PERFIL</span><h2>{{ selectedContact.fullName || selectedContact.username || selectedContact.externalId }}</h2><p>{{ selectedContact.username ? `@${selectedContact.username}` : selectedContact.externalId }} · {{ selectedContact.platform }}</p></div>
+                  <img v-if="selectedContact.profilePicUrl" :src="selectedContact.profilePicUrl" alt="" />
+                </div>
+                <div class="contact-meta"><span>ID externo<strong>{{ selectedContact.externalId }}</strong></span><span>Última atividade<strong>{{ selectedContact.lastSeenAt ? new Date(selectedContact.lastSeenAt).toLocaleString('pt-BR') : 'Ainda não registrada' }}</strong></span></div>
+                <div class="contact-events"><h3>Histórico e eventos</h3><p v-if="contactEvents.length === 0" class="empty-state">Nenhum evento registrado.</p><article v-for="event in contactEvents" :key="event.id" class="contact-event"><span class="contact-event-dot" :class="event.direction" /><div><strong>{{ event.eventType }}</strong><p>{{ event.content || 'Evento sem conteúdo' }}</p><small>{{ new Date(event.occurredAt).toLocaleString('pt-BR') }} · {{ event.conversationId }}</small></div></article></div>
+              </template>
+              <p v-else class="empty-state">Selecione um contato para ver o histórico.</p>
+            </section>
+          </div>
+        </section>
+        <section v-else-if="dialogType === 'dashboard'" class="dashboard-page">
          <div class="dashboard-heading"><div><span class="eyebrow">VISÃO GERAL</span><h2>Resumo da operação</h2><p>Indicadores atuais das suas plataformas e automações.</p></div><button class="secondary-action" @click="loadDashboard">Atualizar</button></div>
          <div class="dashboard-cards">
            <article class="dashboard-card dashboard-card-highlight"><span class="dashboard-card-label">Não lidas</span><strong>{{ dashboardUnread }}</strong><small>Instagram + WhatsApp</small></article>
@@ -812,6 +855,37 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 .close-btn:hover { background: $bg-hover; color: $text-primary; }
 .dialog-content { flex: 1; min-height: 0; overflow-y: auto; padding: 0 24px 24px; scroll-behavior: auto; }
 .settings-page { color: $text-primary; overflow: visible; }
+.contacts-page { min-height: 100%; color: $text-primary; }
+.contacts-layout { display: grid; grid-template-columns: minmax(260px, 34%) minmax(0, 1fr); min-height: 520px; background: $bg-secondary; border: 1px solid $border-color; border-radius: $radius-lg; overflow: hidden; }
+.contacts-list { padding: 18px; border-right: 1px solid $border-color; overflow-y: auto; }
+.contacts-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.contacts-heading h2 { margin: 6px 0 0; font-size: 18px; }
+.contacts-heading .secondary-action { padding: 7px 10px; font-size: 11px; }
+.contact-list-item { display: flex; align-items: center; gap: 10px; width: 100%; margin-bottom: 5px; border: 1px solid transparent; border-radius: $radius-md; padding: 10px; background: transparent; color: $text-primary; text-align: left; cursor: pointer; font: inherit; }
+.contact-list-item:hover { background: $bg-hover; }
+.contact-list-item.active { border-color: $accent; background: $bg-accent-18; }
+.contact-list-item img, .contact-avatar { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px; flex: 0 0 38px; border-radius: 50%; background: $bg-primary; color: $accent; object-fit: cover; font-weight: 800; }
+.contact-list-item > span:last-child { display: grid; gap: 4px; min-width: 0; }
+.contact-list-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.contact-list-item small { color: $text-muted; font-size: 10px; text-transform: capitalize; }
+.contact-detail { min-width: 0; padding: 24px; overflow-y: auto; }
+.contact-detail-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 18px; border-bottom: 1px solid $border-color; }
+.contact-detail-heading h2 { margin: 6px 0 4px; font-size: 22px; }
+.contact-detail-heading p { margin: 0; color: $text-secondary; font-size: 12px; }
+.contact-detail-heading img { width: 64px; height: 64px; border-radius: 50%; object-fit: cover; }
+.contact-meta { display: flex; flex-wrap: wrap; gap: 28px; padding: 18px 0; border-bottom: 1px solid $border-color; }
+.contact-meta span { display: grid; gap: 5px; color: $text-muted; font-size: 10px; text-transform: uppercase; letter-spacing: .7px; }
+.contact-meta strong { color: $text-primary; font-size: 12px; text-transform: none; letter-spacing: 0; }
+.contact-events { padding-top: 18px; }
+.contact-events h3 { margin: 0 0 12px; font-size: 14px; }
+.contact-event { display: flex; gap: 10px; padding: 12px 0; border-bottom: 1px solid $border-color; }
+.contact-event-dot { width: 8px; height: 8px; flex: 0 0 8px; margin-top: 5px; border-radius: 50%; background: $text-muted; }
+.contact-event-dot.inbound { background: #42a5f5; }
+.contact-event-dot.outbound { background: $accent; }
+.contact-event div { display: grid; gap: 4px; min-width: 0; }
+.contact-event strong { font-size: 12px; }
+.contact-event p, .contact-event small { margin: 0; color: $text-secondary; font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.contact-event small { color: $text-muted; font-size: 10px; }
 .dashboard-page { display: grid; gap: 22px; color: $text-primary; }
 .dashboard-heading { display: flex; align-items: end; justify-content: space-between; gap: 16px; }
 .dashboard-heading h2 { margin: 6px 0 4px; font-size: 20px; }

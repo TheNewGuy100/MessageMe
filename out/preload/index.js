@@ -38,6 +38,8 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
     getAutomationFlows: () => invoke("app:getAutomationFlows"),
     saveAutomationFlow: (flow) => invoke("app:saveAutomationFlow", flow),
     deleteAutomationFlow: (id) => invoke("app:deleteAutomationFlow", id),
+    getContacts: () => invoke("app:getContacts"),
+    getContactHistory: (contactId) => invoke("app:getContactHistory", contactId),
     openDialog: (type) => invoke("app:openDialog", type),
     closeDialog: () => invoke("app:closeDialog")
   },

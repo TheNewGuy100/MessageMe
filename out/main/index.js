@@ -149,6 +149,54 @@ function getDb() {
       PRIMARY KEY (platform, account_id, conversation_id)
     );
 
+    CREATE TABLE IF NOT EXISTS contacts (
+      id TEXT PRIMARY KEY,
+      platform TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      external_id TEXT NOT NULL,
+      username TEXT,
+      full_name TEXT,
+      profile_pic_url TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (platform, account_id, external_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contacts_updated
+      ON contacts (updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS contact_conversations (
+      platform TEXT NOT NULL,
+      account_id TEXT NOT NULL DEFAULT '',
+      conversation_id TEXT NOT NULL,
+      contact_id TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'new',
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      PRIMARY KEY (platform, account_id, conversation_id),
+      FOREIGN KEY (contact_id) REFERENCES contacts (id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contact_conversations_contact
+      ON contact_conversations (contact_id, last_seen_at DESC);
+
+    CREATE TABLE IF NOT EXISTS contact_events (
+      id TEXT PRIMARY KEY,
+      contact_id TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      direction TEXT NOT NULL,
+      content TEXT,
+      metadata TEXT NOT NULL DEFAULT '{}',
+      occurred_at TEXT NOT NULL,
+      FOREIGN KEY (contact_id) REFERENCES contacts (id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_contact_events_contact
+      ON contact_events (contact_id, occurred_at DESC);
+
     CREATE TABLE IF NOT EXISTS processed_messages (
       platform TEXT NOT NULL,
       account_id TEXT NOT NULL DEFAULT '',
@@ -219,6 +267,68 @@ function upsertAutomationFlow(flow) {
 }
 function deleteAutomationFlow(id) {
   getDb().prepare("DELETE FROM automation_flows WHERE id = ?").run(id);
+}
+function upsertContact(contact) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const existing = getDb().prepare("SELECT id FROM contacts WHERE platform = ? AND account_id = ? AND external_id = ?").get(contact.platform, contact.accountId || "", contact.externalId);
+  const contactId = existing?.id || contact.id;
+  getDb().prepare(`
+    INSERT INTO contacts
+      (id, platform, account_id, external_id, username, full_name, profile_pic_url, metadata, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(platform, account_id, external_id) DO UPDATE SET
+      username = COALESCE(excluded.username, contacts.username),
+      full_name = COALESCE(excluded.full_name, contacts.full_name),
+      profile_pic_url = COALESCE(excluded.profile_pic_url, contacts.profile_pic_url),
+      metadata = CASE WHEN excluded.metadata = '{}' THEN contacts.metadata ELSE excluded.metadata END,
+      updated_at = excluded.updated_at
+  `).run(contactId, contact.platform, contact.accountId || "", contact.externalId, contact.username || null, contact.fullName || null, contact.profilePicUrl || null, contact.metadata || "{}", now, now);
+  return contactId;
+}
+function upsertContactConversation(conversation) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  getDb().prepare(`
+    INSERT INTO contact_conversations
+      (platform, account_id, conversation_id, contact_id, state, first_seen_at, last_seen_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(platform, account_id, conversation_id) DO UPDATE SET
+      contact_id = excluded.contact_id,
+      state = excluded.state,
+      last_seen_at = excluded.last_seen_at
+  `).run(conversation.platform, conversation.accountId || "", conversation.conversationId, conversation.contactId, conversation.state || "new", now, now);
+}
+function insertContactEvent(event) {
+  getDb().prepare(`
+    INSERT OR IGNORE INTO contact_events
+      (id, contact_id, platform, conversation_id, event_type, direction, content, metadata, occurred_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(event.id, event.contactId, event.platform, event.conversationId, event.eventType, event.direction, event.content || null, event.metadata || "{}", event.occurredAt || (/* @__PURE__ */ new Date()).toISOString());
+}
+function listContacts() {
+  return getDb().prepare(`
+    SELECT c.id, c.platform, c.account_id AS accountId, c.external_id AS externalId,
+      c.username, c.full_name AS fullName, c.profile_pic_url AS profilePicUrl,
+      c.metadata, c.created_at AS createdAt, c.updated_at AS updatedAt,
+      COUNT(cc.conversation_id) AS conversationCount, MAX(cc.last_seen_at) AS lastSeenAt
+    FROM contacts c
+    LEFT JOIN contact_conversations cc ON cc.contact_id = c.id
+    GROUP BY c.id
+    ORDER BY COALESCE(MAX(cc.last_seen_at), c.updated_at) DESC
+  `).all();
+}
+function getContactHistory(contactId) {
+  const contact = getDb().prepare(`
+    SELECT id, platform, account_id AS accountId, external_id AS externalId,
+      username, full_name AS fullName, profile_pic_url AS profilePicUrl,
+      metadata, created_at AS createdAt, updated_at AS updatedAt
+    FROM contacts WHERE id = ?
+  `).get(contactId);
+  const events = getDb().prepare(`
+    SELECT id, contact_id AS contactId, platform, conversation_id AS conversationId,
+      event_type AS eventType, direction, content, metadata, occurred_at AS occurredAt
+    FROM contact_events WHERE contact_id = ? ORDER BY occurred_at DESC LIMIT 500
+  `).all(contactId);
+  return { contact, events };
 }
 function listConversationStates(platform, accountId = "") {
   return getDb().prepare(`
@@ -316,6 +426,47 @@ const INSTAGRAM_ROUTES = {
   hidden: "https://www.instagram.com/direct/requests/hidden/"
 };
 const AUTOMATION_DEBUG_LOG = path.join(process.cwd(), "automation-debug.log");
+const INSTALL_INSTAGRAM_CONTACT_CAPTURE = `(() => {
+  if (window.__messageManagerContactCaptureInstalled) return true
+  const save = payload => {
+    try {
+      const thread = payload?.data?.get_slide_thread_nullable?.as_ig_direct_thread
+      const user = thread?.users?.find(item => item?.id && item.id !== thread.viewer_id) || thread?.users?.[0]
+      if (!thread || !user?.id) return
+      window.__messageManagerLastContact = {
+        conversationId: String(thread.thread_igid || thread.thread_fbid || thread.id || ''),
+        accountId: String(thread.viewer_id || thread.viewer?.id || ''),
+        externalId: String(user.id),
+        username: user.username || '',
+        fullName: user.full_name || '',
+        profilePicUrl: user.profile_pic_url || ''
+      }
+    } catch {}
+  }
+  const originalFetch = window.fetch
+  window.fetch = async (...args) => {
+    const response = await originalFetch(...args)
+    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url || ''
+    if (url.includes('/api/graphql') || url.includes('/graphql')) response.clone().json().then(save).catch(() => {})
+    return response
+  }
+  const originalOpen = XMLHttpRequest.prototype.open
+  const originalSend = XMLHttpRequest.prototype.send
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this.__messageManagerUrl = String(url || '')
+    return originalOpen.call(this, method, url, ...rest)
+  }
+  XMLHttpRequest.prototype.send = function(...args) {
+    if (this.__messageManagerUrl?.includes('/api/graphql') || this.__messageManagerUrl?.includes('/graphql')) {
+      this.addEventListener('load', () => {
+        try { save(JSON.parse(this.responseText)) } catch {}
+      })
+    }
+    return originalSend.apply(this, args)
+  }
+  window.__messageManagerContactCaptureInstalled = true
+  return true
+})()`;
 function writeAutomationDebug(event, data = {}) {
   try {
     fs.appendFileSync(AUTOMATION_DEBUG_LOG, `${(/* @__PURE__ */ new Date()).toISOString()} ${event} ${JSON.stringify(data)}
@@ -323,13 +474,14 @@ function writeAutomationDebug(event, data = {}) {
   } catch {
   }
 }
-const createInstagramAutoReplyScript = (text, prime, allowProcessed, flows, processedMessageIds, knownStates, automaticReplies, activeFlowStates) => `(() => {
+const createInstagramAutoReplyScript = (text, prime, allowProcessed, flows, processedMessageIds, knownStates, automaticReplies, activeFlowStates, completedFlowStates) => `(() => {
   const fallbackReply = ${JSON.stringify(text)}
   const flows = ${JSON.stringify(flows)}
   const automaticReplies = ${JSON.stringify(automaticReplies)}
   const processedMessageIds = new Set(${JSON.stringify(processedMessageIds)})
   const knownStates = ${JSON.stringify(knownStates)}
   const activeFlowStates = ${JSON.stringify(activeFlowStates)}
+  const completedFlowStates = ${JSON.stringify(completedFlowStates)}
   const primeOnly = ${prime}
   const allowProcessedOnce = ${allowProcessed}
   const ownPrefix = /(?:^|\\s)(você|voce|you|tu|tú|vos)\\s*:/i
@@ -381,10 +533,11 @@ const createInstagramAutoReplyScript = (text, prime, allowProcessed, flows, proc
       diagnostic.eligible++
       const preview = getPreview(row)
       if (ownPrefix.test(preview)) continue
-      const scheduledReply = getScheduledAutomaticReply()
-      diagnostic.activeAutomaticReply = Boolean(scheduledReply)
-      let reply = scheduledReply || fallbackReply
-      let selectedFlowId = null
+       const scheduledReply = getScheduledAutomaticReply()
+       diagnostic.activeAutomaticReply = Boolean(scheduledReply)
+       let reply = fallbackReply
+       let selectedFlowId = null
+       let completed = false
       const visibleName = row.querySelector('span[title]')?.getAttribute('title') || ''
       const profileLink = row.querySelector('a[aria-label^="Open the profile page of"]')
       const profileLabel = profileLink?.getAttribute('aria-label') || ''
@@ -392,7 +545,8 @@ const createInstagramAutoReplyScript = (text, prime, allowProcessed, flows, proc
       const name = visibleName || username
       const profile = profileLink?.getAttribute('href') || username || name
 
-      row.click()
+       window.__messageManagerLastContact = null
+       row.click()
       await sleep(800)
       const header = document.querySelector('[data-pagelet="IGDInboxHeaderOffMsys"]')
       if (!header || header.querySelectorAll('img[alt="user-profile-picture"]').length !== 1) {
@@ -401,46 +555,65 @@ const createInstagramAutoReplyScript = (text, prime, allowProcessed, flows, proc
       }
       const messageGroups = [...document.querySelectorAll('[data-pagelet="IGDMessagesList"] [role="group"]')]
       const lastMessage = messageGroups[messageGroups.length - 1]
-      const senderProfile = lastMessage?.querySelector('a[aria-label^="Open the profile page of"]')
-      if (!lastMessage || !senderProfile) {
-        diagnostic.skippedState++
-        returnToInbox()
-        continue
-      }
-      const messageText = (lastMessage.textContent || '').replace(/s+/g, ' ').trim()
-      const messageTime = lastMessage.querySelector('abbr[aria-label]')?.getAttribute('aria-label') || ''
-      const key = profile + '|' + messageText + '|' + messageTime
-      if (processedMessageIds.has(key) && !allowProcessedOnce) {
-        diagnostic.skippedProcessed++
-        returnToInbox()
-        continue
-      }
-      const flowState = activeFlowStates[profile]
-      const flowStateIsActive = flowState && flowState.flowId && Date.now() - Date.parse(flowState.updatedAt) < 3 * 60 * 60 * 1000
-      const normalizedMessage = messageText.toLocaleLowerCase()
-      if (flowStateIsActive) {
-        const lockedFlow = flows.find(flow => flow.id === flowState.flowId)
-        if (lockedFlow) {
-          reply = lockedFlow.response
-          selectedFlowId = lockedFlow.id
-          diagnostic.lockedFlow = true
-        }
-      } else {
-        for (const flow of flows) {
-          if (flow.keywords.some(keyword => normalizedMessage.includes(keyword))) {
-            reply = flow.response
-            selectedFlowId = flow.id
-            diagnostic.matchedFlow = true
-            break
-          }
+       const senderProfile = lastMessage?.querySelector('a[aria-label^="Open the profile page of"]')
+       if (!lastMessage || !senderProfile) {
+         diagnostic.skippedState++
+         returnToInbox()
+         continue
+       }
+       const threadId = location.pathname.match(/\\/direct\\/t\\/([^/?]+)/i)?.[1]
+       const conversationId = threadId
+         ? 'thread:' + decodeURIComponent(threadId)
+         : senderProfile.getAttribute('href') || profile || username || name
+       if (!conversationId) {
+         diagnostic.skippedState++
+         returnToInbox()
+         continue
+       }
+       const messageText = (lastMessage.textContent || '').replace(/\\s+/g, ' ').trim()
+       const messageTime = lastMessage.querySelector('abbr[aria-label]')?.getAttribute('aria-label') || ''
+       const messageElementId = lastMessage.getAttribute('data-message-id') || lastMessage.querySelector('[data-message-id]')?.getAttribute('data-message-id') || ''
+       const flowState = activeFlowStates[conversationId]
+       const flowStateIsActive = flowState && flowState.flowId && Date.now() - Date.parse(flowState.updatedAt) < 3 * 60 * 60 * 1000
+       const normalizedMessage = messageText.toLocaleLowerCase()
+       const lockedFlow = flowStateIsActive ? flows.find(flow => flow.id === flowState.flowId) : null
+       const matchesTrigger = flows.some(flow => flow.keywords.some(keyword => normalizedMessage.includes(keyword)))
+       const matchesCondition = Boolean(lockedFlow?.conditions.some(item => item.keywords.some(keyword => normalizedMessage.includes(keyword))))
+       const completedConversation = Boolean(completedFlowStates[conversationId])
+       const canRetryProcessed = completedConversation || matchesTrigger || matchesCondition
+       const key = conversationId + '|' + (messageElementId || messageText + '|' + messageTime)
+       if (processedMessageIds.has(key) && !allowProcessedOnce && !canRetryProcessed) {
+         diagnostic.skippedProcessed++
+         returnToInbox()
+         continue
+       }
+       if (flowStateIsActive) {
+         if (lockedFlow) {
+           selectedFlowId = lockedFlow.id
+           diagnostic.lockedFlow = true
+           const condition = lockedFlow.conditions.find(item => item.keywords.some(keyword => normalizedMessage.includes(keyword)))
+           reply = condition?.response || lockedFlow.fallbackResponse || lockedFlow.response
+           completed = condition?.completed ?? lockedFlow.completed
+         }
+       } else {
+         reply = scheduledReply || fallbackReply
+         for (const flow of flows) {
+           if (flow.keywords.some(keyword => normalizedMessage.includes(keyword))) {
+             reply = flow.response
+             selectedFlowId = flow.id
+             completed = flow.completed
+             diagnostic.matchedFlow = true
+             break
+           }
         }
       }
       if (!selectedFlowId) {
         const fallbackFlow = flows.find(flow => flow.fallbackResponse)
-        if (fallbackFlow) {
-          reply = fallbackFlow.fallbackResponse
-          selectedFlowId = fallbackFlow.id
-        }
+         if (fallbackFlow) {
+           reply = fallbackFlow.fallbackResponse
+           selectedFlowId = fallbackFlow.id
+           completed = fallbackFlow.completed
+         }
       }
       if (!reply || !reply.trim()) {
         diagnostic.skippedReply++
@@ -458,7 +631,7 @@ const createInstagramAutoReplyScript = (text, prime, allowProcessed, flows, proc
       composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }))
       await sleep(250)
       returnToInbox()
-       return { status: 'sent', conversation: name || 'Conversa sem nome', conversationId: profile, ownState: 'Você: ' + reply, flowId: selectedFlowId, completed: Boolean(flows.find(flow => flow.id === selectedFlowId)?.completed), messageId: key, states: observedStates, diagnostic }
+       return { status: 'sent', conversation: name || 'Conversa sem nome', conversationId, incomingText: messageText, contact: window.__messageManagerLastContact || null, ownState: 'Você: ' + reply, flowId: selectedFlowId, completed, rearm: completedConversation && !selectedFlowId, messageId: key, states: observedStates, diagnostic }
     }
     return { status: 'idle', states: observedStates, diagnostic }
   }
@@ -1055,6 +1228,7 @@ class OfficialViews {
     try {
       const automationProbe = await this.getInstagramAutomationProbe();
       if (!automationProbe || automationProbe.webContents.isDestroyed()) return;
+      await automationProbe.webContents.executeJavaScript(INSTALL_INSTAGRAM_CONTACT_CAPTURE, true).catch(() => false);
       await automationProbe.webContents.executeJavaScript(`(() => {
         const notification = document.querySelector('[aria-label*="nova notificação" i], [aria-label*="new notification" i]')
         const inboxLink = document.querySelector('a[href="/direct/inbox/"]')
@@ -1066,24 +1240,45 @@ class OfficialViews {
         try {
           const definition = JSON.parse(flow.definition);
           const fallbackNode = definition.nodes?.find((node) => node.id === definition.fallbackNodeId) || definition.nodes?.find((node) => node.type === "fallback");
-          const messageNode = definition.nodes?.find((node) => node.type === "message" && node.text?.trim());
-          const responseEdges = (definition.edges || []).filter((edge) => edge.from === messageNode?.id);
+          const messageNodes = definition.nodes?.filter((node) => node.type === "message" && node.text?.trim()) || [];
+          const messageNode = messageNodes.find((node) => !node.parentId) || messageNodes[0];
+          const edges = definition.edges || [];
           const endNodeIds = new Set((definition.nodes || []).filter((node) => node.type === "end").map((node) => node.id));
+          const conditions = (definition.nodes || []).filter((node) => node.type === "condition").map((condition) => {
+            const child = messageNodes.find((node) => node.parentId === condition.id || edges.some((edge) => edge.from === condition.id && edge.to === node.id));
+            const responseEdges2 = edges.filter((edge) => edge.from === child?.id);
+            return {
+              keywords: (condition.keywords || "").split(",").map((keyword) => keyword.trim().toLocaleLowerCase()).filter(Boolean),
+              response: child?.text?.trim() || "",
+              completed: Boolean(child && (responseEdges2.length === 0 || responseEdges2.some((edge) => endNodeIds.has(edge.to))))
+            };
+          }).filter((condition) => condition.keywords.length > 0 && condition.response);
+          const responseEdges = edges.filter((edge) => edge.from === messageNode?.id);
           return {
             id: flow.id,
             keywords: (definition.trigger?.keywords || []).map((keyword) => keyword.toLocaleLowerCase()).filter(Boolean),
             response: definition.actions?.find((action) => action.type === "reply")?.text?.trim() || messageNode?.text?.trim() || "",
             fallbackResponse: fallbackNode?.text?.trim() || "",
-            completed: Boolean(messageNode && (responseEdges.length === 0 || responseEdges.some((edge) => endNodeIds.has(edge.to))))
+            completed: Boolean(messageNode && conditions.length === 0 && (responseEdges.length === 0 || responseEdges.some((edge) => endNodeIds.has(edge.to)))),
+            conditions
           };
         } catch {
-          return { id: flow.id, keywords: [], response: "", fallbackResponse: "", completed: false };
+          return { id: flow.id, keywords: [], response: "", fallbackResponse: "", completed: false, conditions: [] };
         }
       }).filter((flow) => flow.keywords.length > 0 && flow.response || flow.fallbackResponse);
-      writeAutomationDebug("flows-loaded", { flows: flows.map((flow) => ({ id: flow.id, keywords: flow.keywords, responseLength: flow.response.length, fallbackLength: flow.fallbackResponse.length })) });
-      const processedMessageIds = listProcessedMessageIds("instagram");
-      const activeFlowStates = Object.fromEntries(listConversationStates("instagram").filter((state) => state.state === "awaiting_reply" && state.flowId && Date.now() - Date.parse(state.updatedAt) < 3 * 60 * 60 * 1e3).map((state) => [state.conversationId, { flowId: state.flowId, updatedAt: state.updatedAt }]));
-      const result = await automationProbe.webContents.executeJavaScript(createInstagramAutoReplyScript(this.automationText, !this.automationPrimed, this.automationAllowProcessedOnce, flows, processedMessageIds, this.automationKnownStates, this.automaticReplies, activeFlowStates), true);
+      writeAutomationDebug("flows-loaded", { flows: flows.map((flow) => ({ id: flow.id, keywords: flow.keywords, conditions: flow.conditions.length, responseLength: flow.response.length, fallbackLength: flow.fallbackResponse.length })) });
+      const instagramAccountId = getAppSetting("instagram-account-id") || "";
+      const processedMessageIds = listProcessedMessageIds("instagram", instagramAccountId);
+      const now = Date.now();
+      const conversationStates = listConversationStates("instagram", instagramAccountId);
+      for (const state of conversationStates) {
+        if (state.state === "awaiting_reply" && now - Date.parse(state.updatedAt) >= 3 * 60 * 60 * 1e3) {
+          upsertConversationState({ platform: state.platform, accountId: state.accountId, conversationId: state.conversationId, flowId: state.flowId, currentState: "completed", variables: state.variables });
+        }
+      }
+      const activeFlowStates = Object.fromEntries(listConversationStates("instagram", instagramAccountId).filter((state) => state.state === "awaiting_reply" && state.flowId && now - Date.parse(state.updatedAt) < 3 * 60 * 60 * 1e3).map((state) => [state.conversationId, { flowId: state.flowId, updatedAt: state.updatedAt }]));
+      const completedFlowStates = Object.fromEntries(listConversationStates("instagram", instagramAccountId).filter((state) => state.state === "completed").map((state) => [state.conversationId, true]));
+      const result = await automationProbe.webContents.executeJavaScript(createInstagramAutoReplyScript(this.automationText, !this.automationPrimed, this.automationAllowProcessedOnce, flows, processedMessageIds, this.automationKnownStates, this.automaticReplies, activeFlowStates, completedFlowStates), true);
       this.automationKnownStates = result.states || this.automationKnownStates;
       this.automationPrimed = true;
       this.automationAllowProcessedOnce = false;
@@ -1091,6 +1286,7 @@ class OfficialViews {
         status: result.status,
         diagnostic: result.diagnostic,
         conversation: result.conversation || null,
+        conversationId: result.conversationId || null,
         flowId: result.flowId || null
       });
       if (result.status === "idle" && result.diagnostic) {
@@ -1106,14 +1302,47 @@ class OfficialViews {
         }
       }
       if (result?.status === "sent") {
+        const resultAccountId = result.contact?.accountId || instagramAccountId;
+        if (result.contact?.accountId) setAppSetting("instagram-account-id", result.contact.accountId);
         if (result.conversationId && result.ownState) this.automationKnownStates[result.conversationId] = result.ownState;
-        if (result.messageId) markProcessedMessage("instagram", result.messageId);
-        if (result.conversationId) {
+        if (result.messageId) markProcessedMessage("instagram", result.messageId, resultAccountId);
+        if (result.contact?.externalId && result.conversationId) {
+          const contactId = upsertContact({
+            id: crypto.randomUUID(),
+            platform: "instagram",
+            accountId: resultAccountId,
+            externalId: result.contact.externalId,
+            username: result.contact.username,
+            fullName: result.contact.fullName,
+            profilePicUrl: result.contact.profilePicUrl,
+            metadata: JSON.stringify({ threadId: result.contact.conversationId || result.conversationId })
+          });
+          upsertContactConversation({
+            platform: "instagram",
+            accountId: resultAccountId,
+            conversationId: result.conversationId,
+            contactId,
+            state: result.flowId ? result.completed ? "completed" : "awaiting_reply" : "new"
+          });
+          if (result.messageId && result.incomingText) {
+            insertContactEvent({ id: `${result.messageId}:in`, contactId, platform: "instagram", conversationId: result.conversationId, eventType: "message", direction: "inbound", content: result.incomingText, metadata: JSON.stringify({ messageId: result.messageId }) });
+            insertContactEvent({ id: `${result.messageId}:out`, contactId, platform: "instagram", conversationId: result.conversationId, eventType: result.flowId ? "flow_reply" : "automatic_reply", direction: "outbound", content: result.ownState?.replace(/^Você:\s*/, "") || null, metadata: JSON.stringify({ flowId: result.flowId || null, messageId: result.messageId }) });
+          }
+        }
+        if (result.conversationId && result.flowId) {
           upsertConversationState({
             platform: "instagram",
+            accountId: resultAccountId,
             conversationId: result.conversationId,
             flowId: result.flowId,
             currentState: result.completed ? "completed" : "awaiting_reply"
+          });
+        } else if (result.conversationId && result.rearm) {
+          upsertConversationState({
+            platform: "instagram",
+            accountId: resultAccountId,
+            conversationId: result.conversationId,
+            currentState: "new"
           });
         }
         this.addAutomationLog({
@@ -1123,8 +1352,8 @@ class OfficialViews {
           detail: "Resposta automática enviada"
         });
       }
-    } catch {
-      writeAutomationDebug("cycle-error");
+    } catch (error) {
+      writeAutomationDebug("cycle-error", { message: String(error?.message || error), stack: String(error?.stack || "") });
       this.addAutomationLog({
         conversation: "Instagram",
         action: "reply",
@@ -1294,6 +1523,8 @@ function registerIpcHandlers() {
     officialViews.refreshAutomationStatus();
   });
   handle("app:deleteAutomationFlow", (id) => deleteAutomationFlow(id));
+  handle("app:getContacts", () => listContacts());
+  handle("app:getContactHistory", (contactId) => getContactHistory(contactId));
   handle("app:openDialog", (type) => {
     const existingDialog = [...dialogWindows][0];
     if (existingDialog && !existingDialog.isDestroyed()) {
