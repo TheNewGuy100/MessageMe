@@ -296,6 +296,15 @@ export function insertContactEvent(event: { id: string; contactId: string; platf
   `).run(event.id, event.contactId, event.platform, event.conversationId, event.eventType, event.direction, event.content || null, event.metadata || '{}', event.occurredAt || new Date().toISOString())
 }
 
+export function findContactIdByConversation(platform: string, accountId: string, conversationId: string): string | undefined {
+  const row = getDb().prepare(`
+    SELECT contact_id AS contactId
+    FROM contact_conversations
+    WHERE platform = ? AND account_id = ? AND conversation_id = ?
+  `).get(platform, accountId, conversationId) as { contactId?: string } | undefined
+  return row?.contactId
+}
+
 export function listContacts(): ContactRecord[] {
   return getDb().prepare(`
     SELECT c.id, c.platform, c.account_id AS accountId, c.external_id AS externalId,

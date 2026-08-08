@@ -2,7 +2,7 @@ import { app, BrowserWindow, nativeImage, WebContentsView, shell } from 'electro
 import { deflateSync } from 'zlib'
 import { join } from 'path'
 import { appendFileSync } from 'fs'
-import { clearAutomationLogs as clearStoredAutomationLogs, getAppSetting, insertAutomationLog, insertContactEvent, listAutomationFlows, listAutomationLogs, listProcessedMessageIds, listConversationStates, markProcessedMessage, resetAutomationRuntime as resetStoredAutomationRuntime, setAppSetting, upsertContact, upsertContactConversation, upsertConversationState } from './database'
+import { clearAutomationLogs as clearStoredAutomationLogs, findContactIdByConversation, getAppSetting, insertAutomationLog, insertContactEvent, listAutomationFlows, listAutomationLogs, listProcessedMessageIds, listConversationStates, markProcessedMessage, resetAutomationRuntime as resetStoredAutomationRuntime, setAppSetting, upsertContact, upsertContactConversation, upsertConversationState } from './database'
 import { AutomationController } from './automation/controller'
 
 const DEFAULT_SIDEBAR_WIDTH = 200
@@ -17,6 +17,64 @@ const INSTAGRAM_ROUTES = {
 }
 const AUTOMATION_DEBUG_LOG = join(process.cwd(), 'automation-debug.log')
 
+const INSTALL_INSTAGRAM_SOCKET_CAPTURE = `(() => {
+  if (window.__messageManagerSocketCaptureInstalledV7) return true
+  const NativeWebSocket = window.WebSocket
+  const inspect = value => {
+    const report = text => {
+      const printable = String(text || '').replace(/[^\\x20-\\x7E\\r\\n]+/g, ' ').replace(/\\s+/g, ' ').trim()
+      if (!/(message_id|thread_fbid|text_body|request_id|lightspeed)/i.test(printable)) return
+       console.debug('__message-manager-ws__ ' + (typeof text === 'string' ? text : printable))
+    }
+    if (typeof value === 'string') {
+      report(value)
+      try {
+          const envelope = JSON.parse(value)
+          if (typeof envelope?.payload === 'string') {
+            const encodedPayload = envelope.payload.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - envelope.payload.length % 4) % 4)
+          const binary = atob(encodedPayload)
+          const bytes = Uint8Array.from(binary, character => character.charCodeAt(0))
+          const decodedCandidates = [new TextDecoder().decode(bytes)]
+          for (let offset = 1; offset < Math.min(bytes.length, 32); offset++) decodedCandidates.push(new TextDecoder().decode(bytes.slice(offset)))
+          const decoded = decodedCandidates.find(candidate => candidate.includes('"message_id"')) || ''
+          const messageId = decoded.match(/"message_id":"([^"]+)"/)?.[1] || decoded.match(/mid\.\$[A-Za-z0-9._-]+/)?.[0]
+           if (messageId) {
+             const rawTextBody = decoded.match(/"text_body":"([^"]*)"/)?.[1] || ''
+             let textBody = rawTextBody
+             try { textBody = JSON.parse('"' + rawTextBody + '"') } catch {}
+             const socketMessage = {
+               messageId,
+               threadFbid: decoded.match(/"thread_fbid":"([^"]+)"/)?.[1] || '',
+               senderFbid: decoded.match(/"sender_fbid":"([^"]+)"/)?.[1] || '',
+               textBody,
+               timestamp: decoded.match(/"timestamp_ms":"([^"]+)"/)?.[1] || ''
+             }
+             window.__messageManagerLastSocketMessage = socketMessage
+             report(JSON.stringify({
+               decoded: true,
+               ...socketMessage
+             }))
+          }
+        }
+      } catch {}
+    } else if (value instanceof ArrayBuffer) {
+      report(new TextDecoder().decode(value))
+    } else if (value instanceof Blob) {
+      value.arrayBuffer().then(buffer => report(new TextDecoder().decode(buffer))).catch(() => {})
+    }
+  }
+  const WrappedWebSocket = function(...args) {
+    const socket = new NativeWebSocket(...args)
+    socket.addEventListener('message', event => inspect(event.data))
+    return socket
+  }
+  WrappedWebSocket.prototype = NativeWebSocket.prototype
+  Object.setPrototypeOf(WrappedWebSocket, NativeWebSocket)
+  window.WebSocket = WrappedWebSocket
+  window.__messageManagerSocketCaptureInstalledV7 = true
+  return true
+})()`
+
 const INSTALL_INSTAGRAM_CONTACT_CAPTURE = `(() => {
   if (window.__messageManagerContactCaptureInstalled) return true
   const save = payload => {
@@ -24,14 +82,20 @@ const INSTALL_INSTAGRAM_CONTACT_CAPTURE = `(() => {
       const thread = payload?.data?.get_slide_thread_nullable?.as_ig_direct_thread
       const user = thread?.users?.find(item => item?.id && item.id !== thread.viewer_id) || thread?.users?.[0]
       if (!thread || !user?.id) return
-      window.__messageManagerLastContact = {
-        conversationId: String(thread.thread_igid || thread.thread_fbid || thread.id || ''),
+       window.__messageManagerLastContact = {
+         conversationId: String(thread.thread_igid || thread.thread_fbid || thread.id || ''),
         accountId: String(thread.viewer_id || thread.viewer?.id || ''),
         externalId: String(user.id),
         username: user.username || '',
         fullName: user.full_name || '',
-        profilePicUrl: user.profile_pic_url || ''
-      }
+         profilePicUrl: user.profile_pic_url || ''
+       }
+       const incomingMessages = (thread.slide_messages?.edges || [])
+         .map(edge => edge?.node)
+         .filter(message => message?.message_id && String(message.sender_fbid || '') !== String(thread.viewer_id || ''))
+         .sort((left, right) => Number(right.timestamp_ms || 0) - Number(left.timestamp_ms || 0))
+       window.__messageManagerLastMessageId = String(incomingMessages[0]?.message_id || incomingMessages[0]?.id || '') || null
+       window.__messageManagerContactResolve?.(window.__messageManagerLastContact)
     } catch {}
   }
   const originalFetch = window.fetch
@@ -138,8 +202,11 @@ const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProce
       const profile = profileLink?.getAttribute('href') || username || name
 
        window.__messageManagerLastContact = null
+       window.__messageManagerLastMessageId = null
+       window.__messageManagerContactPromise = new Promise(resolve => { window.__messageManagerContactResolve = resolve })
        row.click()
-      await sleep(800)
+       await sleep(800)
+       await Promise.race([window.__messageManagerContactPromise, sleep(1500)])
       const header = document.querySelector('[data-pagelet="IGDInboxHeaderOffMsys"]')
       if (!header || header.querySelectorAll('img[alt="user-profile-picture"]').length !== 1) {
         returnToInbox()
@@ -153,27 +220,36 @@ const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProce
          returnToInbox()
          continue
        }
-       const threadId = location.pathname.match(/\\/direct\\/t\\/([^/?]+)/i)?.[1]
-       const conversationId = threadId
-         ? 'thread:' + decodeURIComponent(threadId)
+       const capturedContact = window.__messageManagerLastContact
+       const capturedMessageId = window.__messageManagerLastMessageId
+       const socketMessage = window.__messageManagerLastSocketMessage
+        const threadId = location.pathname.match(/\\/direct\\/t\\/([^/?]+)/i)?.[1]
+        const messageText = (lastMessage.textContent || '').replace(/\\s+/g, ' ').trim()
+        const normalizedMessage = messageText.toLocaleLowerCase()
+        const socketMessageMatches = socketMessage && (!socketMessage.textBody || normalizedMessage.includes(String(socketMessage.textBody).toLocaleLowerCase()))
+        const conversationId = capturedContact?.conversationId
+          ? 'thread:' + capturedContact.conversationId
+          : socketMessageMatches && socketMessage.threadFbid
+            ? 'thread:' + socketMessage.threadFbid
+          : threadId
+            ? 'thread:' + decodeURIComponent(threadId)
          : senderProfile.getAttribute('href') || profile || username || name
        if (!conversationId) {
          diagnostic.skippedState++
          returnToInbox()
          continue
        }
-       const messageText = (lastMessage.textContent || '').replace(/\\s+/g, ' ').trim()
        const messageTime = lastMessage.querySelector('abbr[aria-label]')?.getAttribute('aria-label') || ''
        const messageElementId = lastMessage.getAttribute('data-message-id') || lastMessage.querySelector('[data-message-id]')?.getAttribute('data-message-id') || ''
        const flowState = activeFlowStates[conversationId]
        const flowStateIsActive = flowState && flowState.flowId && Date.now() - Date.parse(flowState.updatedAt) < 3 * 60 * 60 * 1000
-       const normalizedMessage = messageText.toLocaleLowerCase()
        const lockedFlow = flowStateIsActive ? flows.find(flow => flow.id === flowState.flowId) : null
        const matchesTrigger = flows.some(flow => flow.keywords.some(keyword => normalizedMessage.includes(keyword)))
        const matchesCondition = Boolean(lockedFlow?.conditions.some(item => item.keywords.some(keyword => normalizedMessage.includes(keyword))))
        const completedConversation = Boolean(completedFlowStates[conversationId])
        const canRetryProcessed = completedConversation || matchesTrigger || matchesCondition
-       const key = conversationId + '|' + (messageElementId || messageText + '|' + messageTime)
+       const messageIdentity = (socketMessageMatches && socketMessage.messageId) || capturedMessageId || messageElementId || messageText + '|' + messageTime + '|' + (knownStates[conversationId] || '')
+       const key = conversationId + '|' + messageIdentity
        if (processedMessageIds.has(key) && !allowProcessedOnce && !canRetryProcessed) {
          diagnostic.skippedProcessed++
          returnToInbox()
@@ -223,7 +299,7 @@ const createInstagramAutoReplyScript = (text: string, prime: boolean, allowProce
       composer.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }))
       await sleep(250)
       returnToInbox()
-       return { status: 'sent', conversation: name || 'Conversa sem nome', conversationId, incomingText: messageText, contact: window.__messageManagerLastContact || null, ownState: 'Você: ' + reply, flowId: selectedFlowId, completed, rearm: completedConversation && !selectedFlowId, messageId: key, states: observedStates, diagnostic }
+       return { status: 'sent', conversation: name || 'Conversa sem nome', conversationId, incomingText: messageText, contact: capturedContact || null, ownState: 'Você: ' + reply, flowId: selectedFlowId, completed, rearm: completedConversation && !selectedFlowId, messageId: key, states: observedStates, diagnostic }
     }
     return { status: 'idle', states: observedStates, diagnostic }
   }
@@ -508,6 +584,7 @@ class OfficialViews {
   private whatsappUnreadCount = 0
   private instagramCounts = { inbox: 0, requests: 0, hidden: 0 }
   private automationLogs: AutomationLog[] = []
+  private lastInstagramSocketMessage: { messageId: string; threadFbid: string; senderFbid: string; textBody: string } | null = null
   private readonly automationController = new AutomationController()
 
   isVisible() {
@@ -812,13 +889,44 @@ class OfficialViews {
   }
 
   private createInstagramProbe() {
-    return new WebContentsView({
+    const view = new WebContentsView({
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
         backgroundThrottling: false
       }
     })
+    view.webContents.on('dom-ready', () => {
+      void view.webContents.executeJavaScript(INSTALL_INSTAGRAM_SOCKET_CAPTURE, true).catch(() => {})
+    })
+    view.webContents.on('console-message', (_event, _level, message) => {
+      if (message.startsWith('__message-manager-ws__ ')) {
+        const rawPayload = message.slice('__message-manager-ws__ '.length)
+        writeAutomationDebug('socket-candidate', { payload: rawPayload.slice(0, 500) })
+        try {
+          const envelopeStart = rawPayload.indexOf('{')
+          const envelope = JSON.parse(rawPayload.slice(envelopeStart).replace(/^;\s*/, '')) as { payload?: string }
+          if (envelope.payload) {
+            const decoded = Buffer.from(envelope.payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')
+            const messageId = decoded.match(/"message_id":"([^"]+)"/)?.[1] || decoded.match(/mid\.\$[A-Za-z0-9._-]+/)?.[0]
+            const threadFbid = decoded.match(/"thread_fbid":"([^"]+)"/)?.[1]
+            const senderFbid = decoded.match(/"sender_fbid":"([^"]+)"/)?.[1]
+            const rawTextBody = decoded.match(/"text_body":"([^"]*)"/)?.[1] || ''
+            if (messageId && threadFbid && senderFbid) {
+              let textBody = rawTextBody
+              try { textBody = JSON.parse('"' + rawTextBody + '"') } catch {}
+              this.lastInstagramSocketMessage = { messageId, threadFbid, senderFbid, textBody }
+              writeAutomationDebug('socket-message-decoded', { messageId, threadFbid, senderFbid, textBody })
+            } else {
+              writeAutomationDebug('socket-decode-miss', { decodedLength: decoded.length, hasMessageId: decoded.includes('message_id'), hasThread: decoded.includes('thread_fbid'), preview: decoded.slice(0, 200) })
+            }
+          }
+        } catch (error) {
+          writeAutomationDebug('socket-decode-error', { message: String(error) })
+        }
+      }
+    })
+    return view
   }
 
   private async getInstagramAutomationProbe() {
@@ -985,18 +1093,30 @@ class OfficialViews {
            upsertConversationState({ platform: state.platform, accountId: state.accountId, conversationId: state.conversationId, flowId: state.flowId, currentState: 'completed', variables: state.variables })
          }
        }
-       const activeFlowStates = Object.fromEntries(listConversationStates('instagram', instagramAccountId).filter(state => state.state === 'awaiting_reply' && state.flowId && now - Date.parse(state.updatedAt) < 3 * 60 * 60 * 1000).map(state => [state.conversationId, { flowId: state.flowId!, updatedAt: state.updatedAt }]))
-       const completedFlowStates = Object.fromEntries(listConversationStates('instagram', instagramAccountId).filter(state => state.state === 'completed').map(state => [state.conversationId, true]))
-       const result = await automationProbe.webContents.executeJavaScript(createInstagramAutoReplyScript(this.automationText, !this.automationPrimed, this.automationAllowProcessedOnce, flows, processedMessageIds, this.automationKnownStates, this.automaticReplies, activeFlowStates, completedFlowStates), true) as { status?: string; conversation?: string; conversationId?: string; incomingText?: string; contact?: { conversationId?: string; accountId?: string; externalId?: string; username?: string; fullName?: string; profilePicUrl?: string }; ownState?: string; flowId?: string | null; completed?: boolean; rearm?: boolean; messageId?: string; states?: Record<string, string>; diagnostic?: { url?: string; markers?: number; skippedState?: number; skippedProcessed?: number; skippedReply?: number } }
-      this.automationKnownStates = result.states || this.automationKnownStates
+        const activeFlowStates = Object.fromEntries(listConversationStates('instagram', instagramAccountId).filter(state => state.state === 'awaiting_reply' && state.flowId && now - Date.parse(state.updatedAt) < 3 * 60 * 60 * 1000).map(state => [state.conversationId, { flowId: state.flowId!, updatedAt: state.updatedAt }]))
+        const completedFlowStates = Object.fromEntries(listConversationStates('instagram', instagramAccountId).filter(state => state.state === 'completed').map(state => [state.conversationId, true]))
+        const socketState = this.lastInstagramSocketMessage && activeFlowStates[`thread:${this.lastInstagramSocketMessage.threadFbid}`]
+        if (socketState && this.lastInstagramSocketMessage?.senderFbid) activeFlowStates[`thread:${this.lastInstagramSocketMessage.senderFbid}`] = socketState
+        if (this.lastInstagramSocketMessage?.senderFbid && completedFlowStates[`thread:${this.lastInstagramSocketMessage.threadFbid}`]) completedFlowStates[`thread:${this.lastInstagramSocketMessage.senderFbid}`] = true
+        const result = await automationProbe.webContents.executeJavaScript(createInstagramAutoReplyScript(this.automationText, !this.automationPrimed, this.automationAllowProcessedOnce, flows, processedMessageIds, this.automationKnownStates, this.automaticReplies, activeFlowStates, completedFlowStates), true) as { status?: string; conversation?: string; conversationId?: string; incomingText?: string; contact?: { conversationId?: string; accountId?: string; externalId?: string; username?: string; fullName?: string; profilePicUrl?: string }; ownState?: string; flowId?: string | null; completed?: boolean; rearm?: boolean; messageId?: string; states?: Record<string, string>; diagnostic?: { url?: string; markers?: number; skippedState?: number; skippedProcessed?: number; skippedReply?: number } }
+        const socketMessage = this.lastInstagramSocketMessage
+        if (result.status === 'sent' && result.incomingText && socketMessage && socketMessage.textBody && result.incomingText.toLocaleLowerCase().includes(socketMessage.textBody.toLocaleLowerCase())) {
+          result.conversationId = `thread:${socketMessage.threadFbid}`
+          result.messageId = `${result.conversationId}|${socketMessage.messageId}`
+        }
+       this.automationKnownStates = { ...this.automationKnownStates, ...(result.states || {}) }
       this.automationPrimed = true
       this.automationAllowProcessedOnce = false
-      writeAutomationDebug('cycle-result', {
-        status: result.status,
-        diagnostic: result.diagnostic,
-         conversation: result.conversation || null,
-         conversationId: result.conversationId || null,
-         flowId: result.flowId || null
+       writeAutomationDebug('cycle-result', {
+         status: result.status,
+         diagnostic: result.diagnostic,
+          conversation: result.conversation || null,
+          conversationId: result.conversationId || null,
+          flowId: result.flowId || null,
+          messageId: result.messageId || null,
+          incomingText: result.incomingText || null,
+          contactExternalId: result.contact?.externalId || null,
+          contactAccountId: result.contact?.accountId || null
       })
       if (result.status === 'idle' && result.diagnostic) {
         const diagnostic = `${result.diagnostic.url || 'sem URL'}|${result.diagnostic.rows || 0}|${result.diagnostic.markers || 0}|${result.diagnostic.skippedState || 0}|${result.diagnostic.skippedProcessed || 0}|${result.diagnostic.skippedReply || 0}`
@@ -1015,29 +1135,36 @@ class OfficialViews {
          if (result.contact?.accountId) setAppSetting('instagram-account-id', result.contact.accountId)
          if (result.conversationId && result.ownState) this.automationKnownStates[result.conversationId] = result.ownState
          if (result.messageId) markProcessedMessage('instagram', result.messageId, resultAccountId)
-         if (result.contact?.externalId && result.conversationId) {
-           const contactId = upsertContact({
-             id: crypto.randomUUID(),
-             platform: 'instagram',
-             accountId: resultAccountId,
-             externalId: result.contact.externalId,
-             username: result.contact.username,
-             fullName: result.contact.fullName,
-             profilePicUrl: result.contact.profilePicUrl,
-             metadata: JSON.stringify({ threadId: result.contact.conversationId || result.conversationId })
-           })
-           upsertContactConversation({
-             platform: 'instagram',
-             accountId: resultAccountId,
-             conversationId: result.conversationId,
-             contactId,
-             state: result.flowId ? (result.completed ? 'completed' : 'awaiting_reply') : 'new'
-           })
-           if (result.messageId && result.incomingText) {
-             insertContactEvent({ id: `${result.messageId}:in`, contactId, platform: 'instagram', conversationId: result.conversationId, eventType: 'message', direction: 'inbound', content: result.incomingText, metadata: JSON.stringify({ messageId: result.messageId }) })
-             insertContactEvent({ id: `${result.messageId}:out`, contactId, platform: 'instagram', conversationId: result.conversationId, eventType: result.flowId ? 'flow_reply' : 'automatic_reply', direction: 'outbound', content: result.ownState?.replace(/^Você:\s*/, '') || null, metadata: JSON.stringify({ flowId: result.flowId || null, messageId: result.messageId }) })
+           let contactId = result.conversationId ? findContactIdByConversation('instagram', resultAccountId, result.conversationId) : undefined
+           if (result.contact?.externalId && result.conversationId) {
+            contactId = upsertContact({
+              id: crypto.randomUUID(),
+              platform: 'instagram',
+              accountId: resultAccountId,
+              externalId: result.contact.externalId,
+              username: result.contact.username,
+              fullName: result.contact.fullName,
+              profilePicUrl: result.contact.profilePicUrl,
+              metadata: JSON.stringify({ threadId: result.contact.conversationId || result.conversationId })
+            })
+            upsertContactConversation({
+              platform: 'instagram',
+              accountId: resultAccountId,
+              conversationId: result.conversationId,
+              contactId,
+              state: result.flowId ? (result.completed ? 'completed' : 'awaiting_reply') : 'new'
+            })
            }
-         }
+           if (contactId && result.conversationId) {
+             if (result.messageId && result.incomingText) {
+               insertContactEvent({ id: `${result.messageId}:in`, contactId, platform: 'instagram', conversationId: result.conversationId, eventType: 'message', direction: 'inbound', content: result.incomingText, metadata: JSON.stringify({ messageId: result.messageId }) })
+               insertContactEvent({ id: `${result.messageId}:out`, contactId, platform: 'instagram', conversationId: result.conversationId, eventType: result.flowId ? 'flow_reply' : 'automatic_reply', direction: 'outbound', content: result.ownState?.replace(/^Você:\s*/, '') || null, metadata: JSON.stringify({ flowId: result.flowId || null, messageId: result.messageId }) })
+            } else {
+              writeAutomationDebug('contact-events-skipped', { reason: 'missing-message-data', messageId: result.messageId || null, incomingText: result.incomingText || null, conversationId: result.conversationId })
+            }
+           } else {
+             writeAutomationDebug('contact-events-skipped', { reason: 'missing-contact-data', messageId: result.messageId || null, incomingText: result.incomingText || null, conversationId: result.conversationId || null, externalId: result.contact?.externalId || null })
+           }
          if (result.conversationId && result.flowId) {
              upsertConversationState({
                platform: 'instagram',
